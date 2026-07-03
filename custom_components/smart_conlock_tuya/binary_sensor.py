@@ -1,4 +1,4 @@
-"""Binary sensor entities for Tuya Smart Lock."""
+"""Binary sensor entities for Smart (Con)lock tuya."""
 
 from homeassistant.components.binary_sensor import (
     BinarySensorDeviceClass,
@@ -65,7 +65,7 @@ class TuyaSmartLockOnlineSensor(TuyaSmartLockBinarySensor):
 
     def __init__(self, api, device_id: str, device_name: str) -> None:
         super().__init__(api, device_id, device_name)
-        self._attr_unique_id = f"tuya_smart_lock_{device_id}_online"
+        self._attr_unique_id = f"smart_conlock_tuya_{device_id}_online"
 
     async def async_update(self) -> None:
         """Fetch whether the lock is online."""
@@ -80,23 +80,28 @@ class TuyaSmartLockCallActiveSensor(TuyaSmartLockBinarySensor):
 
     def __init__(self, api, device_id: str, device_name: str) -> None:
         super().__init__(api, device_id, device_name)
-        self._attr_unique_id = f"tuya_smart_lock_{device_id}_call_active"
-        self._raw_video_request_realtime = None
-        self._raw_photo_again = None
+        self._attr_unique_id = f"smart_conlock_tuya_{device_id}_call_active"
+        self._request_state = {}
 
     @property
     def extra_state_attributes(self) -> dict:
         """Return raw DPs used to investigate call/session state."""
         return {
-            "video_request_realtime": self._raw_video_request_realtime,
-            "photo_again": self._raw_photo_again,
+            "source": self._request_state.get("source"),
+            "last_event_time": self._request_state.get("last_event_time"),
+            "seconds_since_event": self._request_state.get("seconds_since_event"),
+            "doorbell": self._request_state.get("doorbell"),
+            "video_request_realtime": self._request_state.get(
+                "video_request_realtime"
+            ),
+            "initiative_message_decoded": self._request_state.get(
+                "initiative_message_decoded"
+            ),
         }
 
     async def async_update(self) -> None:
         """Fetch whether a video call/session appears active."""
-        status = await self._api.async_get_status_map(self._device_id)
-        self._raw_video_request_realtime = status.get("video_request_realtime")
-        self._raw_photo_again = status.get("photo_again")
-        self._attr_is_on = self._api.is_call_active_value(
-            self._raw_video_request_realtime
+        self._request_state = await self._api.async_get_jtmspro_request_state(
+            self._device_id
         )
+        self._attr_is_on = self._request_state["active"]

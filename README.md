@@ -1,4 +1,4 @@
-# Tuya Smart Lock
+# Smart (Con)lock tuya
 
 [![HACS](https://img.shields.io/badge/HACS-Custom-orange?style=flat-square)](https://hacs.xyz/)
 [![GitHub Release](https://img.shields.io/github/v/release/batty211/smartlock-tuya?style=flat-square)](https://github.com/batty211/smartlock-tuya/releases)
@@ -12,7 +12,7 @@ The official Tuya integration doesn't support lock/unlock — it only exposes a 
 
 The official Home Assistant Tuya integration uses the `tuya-device-sharing-sdk` which does not implement the Smart Lock API. Lock devices (categories `mk`, `ms`, `jtmsbh`, etc.) only get a `binary_sensor` with no control capability.
 
-Tuya Smart Lock uses the Cloud API ticket-based flow to send lock/unlock commands — the same mechanism the Tuya and Smart Life mobile apps use.
+Smart (Con)lock tuya uses the Cloud API ticket-based flow to send lock/unlock commands — the same mechanism the Tuya and Smart Life mobile apps use.
 
 ## What you get
 
@@ -79,15 +79,15 @@ Both services are free for personal use. They may require periodic renewal (ever
 1. Open HACS in Home Assistant
 2. Click the 3 dots menu > **Custom repositories**
 3. Add `batty211/smartlock-tuya` as **Integration**
-4. Search for and install **Tuya Smart Lock**
+4. Search for and install **Smart (Con)lock tuya**
 5. Restart Home Assistant
-6. Go to **Settings** > **Integrations** > **Add Integration** > search for **Tuya Smart Lock**
+6. Go to **Settings** > **Integrations** > **Add Integration** > search for **Smart (Con)lock tuya**
 
 ### Manual
 
-1. Copy the `custom_components/tuya_smart_lock` folder to your Home Assistant `custom_components/` directory
+1. Copy the `custom_components/smart_conlock_tuya` folder to your Home Assistant `custom_components/` directory
 2. Restart Home Assistant
-3. Go to **Settings** > **Integrations** > **Add Integration** > search for **Tuya Smart Lock**
+3. Go to **Settings** > **Integrations** > **Add Integration** > search for **Smart (Con)lock tuya**
 
 ## Configuration
 
@@ -134,12 +134,12 @@ For category `jtmspro`, the integration adds:
 
 The online sensor uses Tuya device details from `GET /v1.0/devices/{device_id}`.
 
-The call-active sensor is based on the `video_request_realtime` datapoint. The raw `video_request_realtime` and `photo_again` values are exposed as attributes so you can compare idle, ringing, active call, and hang-up states from a real lock.
+The call-active sensor is based on recent Tuya report logs for `doorbell` and `initiative_message`, with `video_request_realtime` exposed as debugging evidence. This avoids relying on stale latest-status values for video lock request state.
 
 Unlock protection for `jtmspro`:
 
 - If the device is not online, unlock is refused.
-- If no active video call/session is detected, unlock is refused.
+- If no recent doorbell/video request is detected, unlock is refused and the lock entity becomes unavailable so the Home Assistant unlock button cannot be pressed.
 - Other lock categories keep the original unlock behavior.
 
 ### Video and media investigation

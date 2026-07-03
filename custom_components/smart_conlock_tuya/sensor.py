@@ -1,4 +1,4 @@
-"""Sensor entities for Tuya Smart Lock."""
+"""Sensor entities for Smart (Con)lock tuya."""
 
 from homeassistant.components.sensor import SensorEntity
 from homeassistant.config_entries import ConfigEntry
@@ -48,7 +48,7 @@ class TuyaSmartLockBatterySensor(SensorEntity):
         self._device_id = device_id
         self._device_name = device_name
         self._battery_state: str | None = None
-        self._attr_unique_id = f"tuya_smart_lock_{device_id}_battery"
+        self._attr_unique_id = f"smart_conlock_tuya_{device_id}_battery"
 
     @property
     def device_info(self):

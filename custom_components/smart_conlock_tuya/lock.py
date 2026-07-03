@@ -1,4 +1,6 @@
-"""Lock entity for Tuya Smart Lock."""
+"""Lock entity for Smart (Con)lock tuya."""
+
+from __future__ import annotations
 
 import logging
 
@@ -32,9 +34,10 @@ async def async_setup_entry(
     if auto_lock_time is None:
         auto_lock_time = DEFAULT_AUTO_LOCK_DELAY
 
-    async_add_entities([
-        TuyaSmartLock(api, device_id, device_name, device_category, auto_lock_time)
-    ])
+    async_add_entities(
+        [TuyaSmartLock(api, device_id, device_name, device_category, auto_lock_time)],
+        True,
+    )
 
 
 class TuyaSmartLock(LockEntity):
@@ -42,7 +45,6 @@ class TuyaSmartLock(LockEntity):
 
     _attr_has_entity_name = True
     _attr_name = None
-    _attr_should_poll = False
 
     def __init__(
         self,
@@ -56,11 +58,14 @@ class TuyaSmartLock(LockEntity):
         self._device_id = device_id
         self._device_category = device_category
         self._auto_lock_time = auto_lock_time
-        self._attr_unique_id = f"tuya_smart_lock_{device_id}"
+        self._attr_unique_id = f"smart_conlock_tuya_{device_id}"
         self._attr_is_locked = True
         self._attr_is_locking = False
         self._attr_is_unlocking = False
+        self._attr_available = device_category != "jtmspro"
+        self._attr_should_poll = device_category == "jtmspro"
         self._device_name = device_name
+        self._request_state = {}
 
     @property
     def device_info(self):
@@ -70,6 +75,29 @@ class TuyaSmartLock(LockEntity):
             "name": self._device_name,
             "manufacturer": "Tuya",
         }
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        """Return jtmspro unlock eligibility details."""
+        if self._device_category != "jtmspro":
+            return {}
+
+        return {
+            "unlock_available": self._attr_available,
+            "call_active": self._request_state.get("active"),
+            "call_active_source": self._request_state.get("source"),
+            "call_active_seconds_since_event": self._request_state.get(
+                "seconds_since_event"
+            ),
+        }
+
+    async def async_update(self) -> None:
+        """Update jtmspro unlock availability."""
+        if self._device_category != "jtmspro":
+            self._attr_available = True
+            return
+
+        await self._async_update_unlock_availability()
 
     async def async_lock(self, **kwargs) -> None:
         """Lock the door."""
@@ -107,7 +135,7 @@ class TuyaSmartLock(LockEntity):
         if self._device_category != "jtmspro":
             return True
 
-        online = await self._api.async_get_device_online(self._device_id)
+        online, call_active = await self._async_update_unlock_availability()
         if online is not True:
             _LOGGER.warning(
                 "Refusing to unlock %s because jtmspro device is not online",
@@ -115,7 +143,6 @@ class TuyaSmartLock(LockEntity):
             )
             return False
 
-        call_active = await self._api.async_get_call_active(self._device_id)
         if call_active is not True:
             _LOGGER.warning(
                 "Refusing to unlock %s because no active video call was detected",
@@ -124,6 +151,16 @@ class TuyaSmartLock(LockEntity):
             return False
 
         return True
+
+    async def _async_update_unlock_availability(self) -> tuple[bool | None, bool | None]:
+        """Fetch and store whether unlock should be available for a jtmspro lock."""
+        online = await self._api.async_get_device_online(self._device_id)
+        self._request_state = await self._api.async_get_jtmspro_request_state(
+            self._device_id
+        )
+        call_active = self._request_state["active"]
+        self._attr_available = online is True and call_active is True
+        return online, call_active
 
     def _set_locked(self) -> None:
         """Reset state to locked after auto-lock delay."""

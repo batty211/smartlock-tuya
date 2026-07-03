@@ -2,7 +2,7 @@
   "config": {
     "step": {
       "user": {
-        "title": "Tuya Cloud Credentials",
+        "title": "Smart (Con)lock tuya",
         "description": "Enter your Tuya IoT Platform credentials.\n\nYou need an active **IoT Core** and **Smart Lock Open Service** subscription on [iot.tuya.com](https://iot.tuya.com).",
         "data": {
           "access_id": "Access ID",

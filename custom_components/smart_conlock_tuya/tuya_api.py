@@ -1,11 +1,16 @@
 """Tuya Cloud API client for Smart Lock operations."""
 
+from __future__ import annotations
+
+import base64
+import binascii
 import hashlib
 import hmac
 import json
 import logging
 import time
 from typing import Any
+from urllib.parse import urlencode
 
 import aiohttp
 
@@ -16,6 +21,7 @@ from .const import (
     DOOR_OPERATE_ENDPOINT,
     LATEST_MEDIA_ENDPOINT,
     LOCK_CATEGORIES,
+    REPORT_LOGS_ENDPOINT,
     REMOTE_UNLOCKS_ENDPOINT,
     SPECIFICATIONS_ENDPOINT,
     STATUS_ENDPOINT,
@@ -28,6 +34,12 @@ _LOGGER = logging.getLogger(__name__)
 
 TRUTHY_VALUES = {"1", "true", "on", "active"}
 FALSY_VALUES = {"0", "false", "off", "inactive"}
+JTMSPRO_REQUEST_CODES = [
+    "doorbell",
+    "initiative_message",
+    "video_request_realtime",
+]
+JTMSPRO_REQUEST_WINDOW = 90
 
 
 class TuyaCloudApi:
@@ -207,6 +219,43 @@ class TuyaCloudApi:
             if "code" in dp
         }
 
+    async def async_get_report_logs(
+        self,
+        device_id: str,
+        codes: list[str],
+        start_time: int,
+        end_time: int,
+        size: int = 20,
+    ) -> list[dict[str, Any]] | None:
+        """Get Tuya status reporting logs for selected DP codes."""
+        params = {
+            "codes": ",".join(codes),
+            "start_time": start_time,
+            "end_time": end_time,
+            "last_row_key": "",
+            "size": size,
+        }
+        path = (
+            f"{REPORT_LOGS_ENDPOINT.format(device_id=device_id)}?"
+            f"{urlencode(params, safe=',')}"
+        )
+        resp = await self._request("GET", path)
+
+        if not resp.get("success"):
+            _LOGGER.warning("Could not get report logs: %s", resp.get("msg"))
+            return None
+
+        result = resp.get("result", {})
+        logs = result.get("logs", [])
+        if not isinstance(logs, list):
+            return []
+
+        return sorted(
+            logs,
+            key=lambda log: self._event_time_ms(log.get("event_time")),
+            reverse=True,
+        )
+
     def is_call_active_value(self, value: Any) -> bool | None:
         """Interpret a Tuya video call/session DP value."""
         if isinstance(value, bool):
@@ -228,10 +277,116 @@ class TuyaCloudApi:
 
         return None
 
+    def _event_time_ms(self, event_time: Any) -> int:
+        """Normalize Tuya event time to milliseconds."""
+        if not isinstance(event_time, int):
+            return 0
+        if event_time < 1_000_000_000_000:
+            return event_time * 1000
+        return event_time
+
+    def _decode_base64_json(self, value: Any) -> dict[str, Any] | None:
+        """Decode a Tuya raw base64 JSON payload when possible."""
+        if not isinstance(value, str) or not value:
+            return None
+
+        try:
+            decoded = base64.b64decode(value, validate=True)
+            text = decoded.decode()
+            data = json.loads(text)
+        except (binascii.Error, UnicodeDecodeError, json.JSONDecodeError):
+            return None
+
+        return data if isinstance(data, dict) else None
+
+    def _is_active_doorbell_value(self, value: Any) -> bool:
+        """Return True when a doorbell report value is an active request."""
+        if value is True:
+            return True
+        if isinstance(value, str):
+            return value.strip().lower() in {"true", "on"}
+        return False
+
+    def _is_active_initiative_message(self, value: Any) -> tuple[bool, dict | None]:
+        """Return whether an initiative_message payload is a video lock request."""
+        decoded = self._decode_base64_json(value)
+        active = (
+            isinstance(decoded, dict)
+            and decoded.get("cmd") == "door_lock_video"
+            and decoded.get("alarm") is True
+        )
+        return active, decoded
+
+    async def async_get_jtmspro_request_state(
+        self,
+        device_id: str,
+        window_seconds: int = JTMSPRO_REQUEST_WINDOW,
+    ) -> dict[str, Any]:
+        """Get request/call state for jtmspro locks from recent report logs."""
+        now_ms = int(time.time() * 1000)
+        start_time = now_ms - (window_seconds * 1000)
+        logs = await self.async_get_report_logs(
+            device_id,
+            JTMSPRO_REQUEST_CODES,
+            start_time,
+            now_ms,
+            size=20,
+        )
+
+        state: dict[str, Any] = {
+            "active": None if logs is None else False,
+            "source": None,
+            "last_event_time": None,
+            "seconds_since_event": None,
+            "doorbell": None,
+            "video_request_realtime": None,
+            "initiative_message_decoded": None,
+        }
+        if logs is None:
+            return state
+
+        for log in logs:
+            code = log.get("code")
+            value = log.get("value")
+            event_time = self._event_time_ms(log.get("event_time"))
+
+            if code == "doorbell" and state["doorbell"] is None:
+                state["doorbell"] = value
+            elif (
+                code == "video_request_realtime"
+                and state["video_request_realtime"] is None
+            ):
+                state["video_request_realtime"] = value
+            elif (
+                code == "initiative_message"
+                and state["initiative_message_decoded"] is None
+            ):
+                state["initiative_message_decoded"] = self._decode_base64_json(value)
+
+            if state["active"] is True:
+                continue
+
+            initiative_active = False
+            decoded = None
+            if code == "initiative_message":
+                initiative_active, decoded = self._is_active_initiative_message(value)
+                state["initiative_message_decoded"] = decoded
+
+            if (
+                (code == "doorbell" and self._is_active_doorbell_value(value))
+                or initiative_active
+            ):
+                state["active"] = True
+                state["source"] = code
+                state["last_event_time"] = event_time
+                state["seconds_since_event"] = max(0, (now_ms - event_time) // 1000)
+
+        return state
+
     async def async_get_call_active(self, device_id: str) -> bool | None:
         """Get whether a doorbell/video call session appears active."""
-        status = await self.async_get_status_map(device_id)
-        return self.is_call_active_value(status.get("video_request_realtime"))
+        request_state = await self.async_get_jtmspro_request_state(device_id)
+        return request_state["active"]
 
     async def async_get_device_specifications(self, device_id: str) -> dict | None:
         """Get device specifications for DP investigation."""

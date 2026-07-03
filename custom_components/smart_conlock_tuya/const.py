@@ -1,6 +1,6 @@
-"""Constants for Tuya Smart Lock."""
+"""Constants for Smart (Con)lock tuya."""
 
-DOMAIN = "tuya_smart_lock"
+DOMAIN = "smart_conlock_tuya"
 
 CONF_ACCESS_ID = "access_id"
 CONF_ACCESS_SECRET = "access_secret"
@@ -39,3 +39,4 @@ STREAM_ALLOCATE_ENDPOINT = "/v1.0/devices/{device_id}/stream/actions/allocate"
 WEBRTC_CONFIG_ENDPOINT = "/v1.0/devices/{device_id}/webrtc-configs"
 LATEST_MEDIA_ENDPOINT = "/v1.0/devices/{device_id}/door-lock/latest/media/url"
 ALBUMS_MEDIA_ENDPOINT = "/v1.0/smart-lock/devices/{device_id}/albums-media"
+REPORT_LOGS_ENDPOINT = "/v2.1/cloud/thing/{device_id}/report-logs"

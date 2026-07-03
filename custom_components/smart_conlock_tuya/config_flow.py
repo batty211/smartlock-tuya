@@ -1,4 +1,4 @@
-"""Config flow for Tuya Smart Lock."""
+"""Config flow for Smart (Con)lock tuya."""
 
 import logging
 
@@ -28,7 +28,7 @@ REGIONS = {
 
 
 class TuyaSmartLockConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
-    """Handle a config flow for Tuya Smart Lock."""
+    """Handle a config flow for Smart (Con)lock tuya."""
 
     VERSION = 1
 

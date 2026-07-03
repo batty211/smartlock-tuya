@@ -1,4 +1,4 @@
-"""Tuya Smart Lock integration."""
+"""Smart (Con)lock tuya integration."""
 
 import logging
 
@@ -22,7 +22,7 @@ PLATFORMS = [Platform.LOCK, Platform.SENSOR, Platform.BINARY_SENSOR]
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Set up Tuya Smart Lock from a config entry."""
+    """Set up Smart (Con)lock tuya from a config entry."""
     hass.data.setdefault(DOMAIN, {})
 
     api = TuyaCloudApi(
