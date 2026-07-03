@@ -5,19 +5,29 @@ import hmac
 import json
 import logging
 import time
+from typing import Any
 
 import aiohttp
 
 from .const import (
+    ALBUMS_MEDIA_ENDPOINT,
     API_REGIONS,
+    DEVICE_DETAILS_ENDPOINT,
     DOOR_OPERATE_ENDPOINT,
+    LATEST_MEDIA_ENDPOINT,
     LOCK_CATEGORIES,
     REMOTE_UNLOCKS_ENDPOINT,
+    SPECIFICATIONS_ENDPOINT,
     STATUS_ENDPOINT,
+    STREAM_ALLOCATE_ENDPOINT,
     TICKET_ENDPOINT,
+    WEBRTC_CONFIG_ENDPOINT,
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+TRUTHY_VALUES = {"1", "true", "on", "active"}
+FALSY_VALUES = {"0", "false", "off", "inactive"}
 
 
 class TuyaCloudApi:
@@ -163,19 +173,139 @@ class TuyaCloudApi:
 
         return False
 
-    async def async_get_auto_lock_time(self, device_id: str) -> int | None:
-        """Get the auto-lock delay in seconds from device status."""
+    async def async_get_device_info(self, device_id: str) -> dict | None:
+        """Get device details, including category, online state, and latest status."""
+        path = DEVICE_DETAILS_ENDPOINT.format(device_id=device_id)
+        resp = await self._request("GET", path)
+
+        if not resp.get("success"):
+            _LOGGER.warning("Could not get device info: %s", resp.get("msg"))
+            return None
+
+        return resp.get("result")
+
+    async def async_get_device_online(self, device_id: str) -> bool | None:
+        """Get whether the device is online."""
+        device_info = await self.async_get_device_info(device_id)
+        if device_info is None:
+            return None
+
+        return device_info.get("online")
+
+    async def async_get_status_map(self, device_id: str) -> dict[str, Any]:
+        """Get the latest device status as a mapping from DP code to value."""
         path = STATUS_ENDPOINT.format(device_id=device_id)
         resp = await self._request("GET", path)
 
         if not resp.get("success"):
+            _LOGGER.warning("Could not get device status: %s", resp.get("msg"))
+            return {}
+
+        return {
+            dp["code"]: dp.get("value")
+            for dp in resp.get("result", [])
+            if "code" in dp
+        }
+
+    def is_call_active_value(self, value: Any) -> bool | None:
+        """Interpret a Tuya video call/session DP value."""
+        if isinstance(value, bool):
+            return value
+
+        if isinstance(value, int):
+            if value == 1:
+                return True
+            if value == 0:
+                return False
             return None
 
-        for dp in resp.get("result", []):
-            if dp["code"] == "auto_lock_time":
-                return dp["value"]
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in TRUTHY_VALUES:
+                return True
+            if normalized in FALSY_VALUES:
+                return False
 
         return None
+
+    async def async_get_call_active(self, device_id: str) -> bool | None:
+        """Get whether a doorbell/video call session appears active."""
+        status = await self.async_get_status_map(device_id)
+        return self.is_call_active_value(status.get("video_request_realtime"))
+
+    async def async_get_device_specifications(self, device_id: str) -> dict | None:
+        """Get device specifications for DP investigation."""
+        path = SPECIFICATIONS_ENDPOINT.format(device_id=device_id)
+        resp = await self._request("GET", path)
+
+        if not resp.get("success"):
+            _LOGGER.warning("Could not get device specifications: %s", resp.get("msg"))
+            return None
+
+        return resp.get("result")
+
+    async def async_get_stream_url(
+        self,
+        device_id: str,
+        stream_type: str = "hls",
+    ) -> str | None:
+        """Get a live stream URL for investigation."""
+        path = STREAM_ALLOCATE_ENDPOINT.format(device_id=device_id)
+        resp = await self._request("POST", path, {"type": stream_type})
+
+        if not resp.get("success"):
+            _LOGGER.warning("Could not get stream URL: %s", resp.get("msg"))
+            return None
+
+        result = resp.get("result", {})
+        return result.get("url")
+
+    async def async_get_webrtc_config(self, device_id: str) -> dict | None:
+        """Get WebRTC configuration for investigation."""
+        path = WEBRTC_CONFIG_ENDPOINT.format(device_id=device_id)
+        resp = await self._request("GET", path)
+
+        if not resp.get("success"):
+            _LOGGER.warning("Could not get WebRTC config: %s", resp.get("msg"))
+            return None
+
+        return resp.get("result")
+
+    async def async_get_latest_media_url(
+        self,
+        device_id: str,
+        file_type: int = 1,
+    ) -> dict | None:
+        """Get latest lock media URL metadata for investigation."""
+        path = LATEST_MEDIA_ENDPOINT.format(device_id=device_id)
+        resp = await self._request("GET", f"{path}?file_type={file_type}")
+
+        if not resp.get("success"):
+            _LOGGER.warning("Could not get latest media URL: %s", resp.get("msg"))
+            return None
+
+        return resp.get("result")
+
+    async def async_get_albums_media(self, device_id: str) -> dict | None:
+        """Get albums media metadata for investigation."""
+        path = ALBUMS_MEDIA_ENDPOINT.format(device_id=device_id)
+        resp = await self._request("GET", path)
+
+        if not resp.get("success"):
+            _LOGGER.warning("Could not get albums media: %s", resp.get("msg"))
+            return None
+
+        return resp.get("result")
+
+    async def async_get_auto_lock_time(self, device_id: str) -> int | None:
+        """Get the auto-lock delay in seconds from device status."""
+        status = await self.async_get_status_map(device_id)
+        return status.get("auto_lock_time")
+
+    async def async_get_battery_state(self, device_id: str) -> str | None:
+        """Get the battery state from device status."""
+        status = await self.async_get_status_map(device_id)
+        return status.get("battery_state")
 
     async def async_unlock(self, device_id: str) -> bool:
         """Unlock the door via ticket flow."""

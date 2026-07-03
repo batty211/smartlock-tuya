@@ -6,12 +6,19 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
 
-from .const import CONF_ACCESS_ID, CONF_ACCESS_SECRET, CONF_API_REGION, DOMAIN
+from .const import (
+    CONF_ACCESS_ID,
+    CONF_ACCESS_SECRET,
+    CONF_API_REGION,
+    CONF_DEVICE_CATEGORY,
+    CONF_DEVICE_ID,
+    DOMAIN,
+)
 from .tuya_api import TuyaCloudApi
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS = [Platform.LOCK]
+PLATFORMS = [Platform.LOCK, Platform.SENSOR, Platform.BINARY_SENSOR]
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -24,9 +31,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         region=entry.data[CONF_API_REGION],
     )
 
+    entry_data = dict(entry.data)
+    device_info = None
+
+    if not entry_data.get(CONF_DEVICE_CATEGORY):
+        device_id = entry_data.get(CONF_DEVICE_ID)
+        if device_id:
+            try:
+                device_info = await api.async_get_device_info(device_id)
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.warning("Could not fetch Tuya device info: %s", err)
+                device_info = None
+            if device_info:
+                entry_data[CONF_DEVICE_CATEGORY] = device_info.get("category", "")
+
     hass.data[DOMAIN][entry.entry_id] = {
         "api": api,
-        "entry_data": entry.data,
+        "entry_data": entry_data,
+        "device_info": device_info,
     }
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)

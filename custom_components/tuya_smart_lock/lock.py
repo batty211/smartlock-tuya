@@ -7,7 +7,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import CONF_DEVICE_ID, CONF_DEVICE_NAME, DOMAIN
+from .const import CONF_DEVICE_CATEGORY, CONF_DEVICE_ID, CONF_DEVICE_NAME, DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -25,13 +25,16 @@ async def async_setup_entry(
     entry_data = data["entry_data"]
     device_id = entry_data[CONF_DEVICE_ID]
     device_name = entry_data[CONF_DEVICE_NAME]
+    device_category = entry_data.get(CONF_DEVICE_CATEGORY)
 
     # Read auto_lock_time from device
     auto_lock_time = await api.async_get_auto_lock_time(device_id)
     if auto_lock_time is None:
         auto_lock_time = DEFAULT_AUTO_LOCK_DELAY
 
-    async_add_entities([TuyaSmartLock(api, device_id, device_name, auto_lock_time)])
+    async_add_entities([
+        TuyaSmartLock(api, device_id, device_name, device_category, auto_lock_time)
+    ])
 
 
 class TuyaSmartLock(LockEntity):
@@ -41,9 +44,17 @@ class TuyaSmartLock(LockEntity):
     _attr_name = None
     _attr_should_poll = False
 
-    def __init__(self, api, device_id: str, device_name: str, auto_lock_time: int) -> None:
+    def __init__(
+        self,
+        api,
+        device_id: str,
+        device_name: str,
+        device_category: str | None,
+        auto_lock_time: int,
+    ) -> None:
         self._api = api
         self._device_id = device_id
+        self._device_category = device_category
         self._auto_lock_time = auto_lock_time
         self._attr_unique_id = f"tuya_smart_lock_{device_id}"
         self._attr_is_locked = True
@@ -77,7 +88,9 @@ class TuyaSmartLock(LockEntity):
         self._attr_is_unlocking = True
         self.async_write_ha_state()
 
-        success = await self._api.async_unlock(self._device_id)
+        success = False
+        if await self._async_can_unlock():
+            success = await self._api.async_unlock(self._device_id)
 
         self._attr_is_unlocking = False
         if success:
@@ -89,8 +102,30 @@ class TuyaSmartLock(LockEntity):
             delay = self._auto_lock_time + 1
             self.hass.loop.call_later(delay, self._set_locked)
 
+    async def _async_can_unlock(self) -> bool:
+        """Check whether unlocking is allowed for this lock."""
+        if self._device_category != "jtmspro":
+            return True
+
+        online = await self._api.async_get_device_online(self._device_id)
+        if online is not True:
+            _LOGGER.warning(
+                "Refusing to unlock %s because jtmspro device is not online",
+                self._device_id,
+            )
+            return False
+
+        call_active = await self._api.async_get_call_active(self._device_id)
+        if call_active is not True:
+            _LOGGER.warning(
+                "Refusing to unlock %s because no active video call was detected",
+                self._device_id,
+            )
+            return False
+
+        return True
+
     def _set_locked(self) -> None:
         """Reset state to locked after auto-lock delay."""
         self._attr_is_locked = True
         self.async_write_ha_state()
-
