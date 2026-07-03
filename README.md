@@ -198,4 +198,5 @@ Forked from [`nicolasglg/tuya-smart-lock`](https://github.com/nicolasglg/tuya-sm
 
 ## License
 
-MIT License - see [LICENSE](LICENSE) for details.
+This fork keeps the original upstream MIT License and copyright notice.
+See [LICENSE](LICENSE) for details.
