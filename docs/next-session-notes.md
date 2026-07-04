@@ -405,7 +405,7 @@ Implemented:
   - it does not represent physical lock status;
   - it does not call the Tuya lock API from `async_lock()`;
   - `async_lock()` only resets the control state locally to ready/locked;
-  - when `Call Active` is off, it resets to `locked` so Home Assistant shows the next possible action as Unlock;
+  - it stays internally `locked` so Home Assistant shows the next possible action as Unlock, even when disabled;
   - when `Call Active` is off or the device is offline, it is unavailable/disabled so users cannot press it randomly;
   - when the device is online and `Call Active` is on, it becomes available and `async_unlock()` can call the Tuya unlock API.
 - The remote unlock control exposes diagnostic attributes:
@@ -427,8 +427,9 @@ Added a separate manual physical status entity:
   - can be changed manually in Home Assistant;
   - can be changed by automations from other sensors;
   - restores state after Home Assistant restart;
-  - is not changed automatically by remote unlock commands.
+  - changes to `unlocked` after a successful remote unlock command.
 - If Tuya ever exposes a real physical state DP such as `lock_motor_state`, runtime can update this physical status entity only when `state_confidence` is `physical_dp`.
+- Manual changes are preserved over older remote unlock operations; a later successful remote unlock can update Physical Status again.
 
 Important behavior to preserve:
 

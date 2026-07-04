@@ -98,7 +98,7 @@ class TuyaSmartLock(LockEntity):
         self._relock_delay = relock_delay
         self._relock_delay_source = relock_delay_source
         self._attr_unique_id = f"smart_conlock_tuya_{device_id}"
-        self._attr_is_locked = None
+        self._attr_is_locked = True if device_category == "jtmspro" else None
         self._attr_is_locking = False
         self._attr_is_unlocking = False
         self._attr_available = device_category != "jtmspro"
@@ -280,7 +280,7 @@ class TuyaSmartLock(LockEntity):
         if call_active is not True:
             self._reset_remote_unlock_control("call_inactive")
         else:
-            self._attr_is_locked = self._command_state_source != "unlock_success"
+            self._attr_is_locked = True
         self._attr_available = online is True and call_active is True
         return online, call_active
 
@@ -305,12 +305,15 @@ class TuyaSmartLock(LockEntity):
         self._command_state_source = source
 
     def _record_remote_unlock_success(self) -> None:
-        """Record a successful jtmspro unlock command without claiming physical state."""
-        self._attr_is_locked = False
+        """Record a successful jtmspro unlock command."""
+        self._attr_is_locked = True
         self._command_state_source = "unlock_success"
         event_time = int(time.time() * 1000)
         self._lock_state = {
             **self._lock_state,
+            "locked": False,
+            "state_source": "remote_unlock_control",
+            "state_confidence": "command_assumed",
             "last_lock_operation": {
                 "action": "unlocked",
                 "source": "remote_unlock_control",
@@ -318,6 +321,12 @@ class TuyaSmartLock(LockEntity):
                 "value": None,
             },
         }
+        if self._runtime is not None:
+            self._runtime.record_home_assistant_operation(
+                "unlocked",
+                False,
+                "remote_unlock_control",
+            )
         self.hass.bus.async_fire(
             LOCK_OPERATION_EVENT,
             {
@@ -462,20 +471,32 @@ class TuyaSmartLockPhysicalStatus(LockEntity, RestoreEntity):
         self.async_write_ha_state()
 
     def _sync_from_runtime(self) -> None:
-        """Use Tuya physical DP only when one actually exists."""
+        """Sync trusted physical state and successful remote unlocks."""
         if self._runtime is None:
             return
 
         self._lock_state = self._runtime.state.lock_state()
-        if self._lock_state.get("state_confidence") != "physical_dp":
-            return
+        state_confidence = self._lock_state.get("state_confidence")
+        state_source = self._lock_state.get("state_source")
+        last_operation = self._lock_state.get("last_lock_operation") or {}
 
         locked = self._lock_state.get("locked")
-        if locked is not None:
+        if state_confidence == "physical_dp" and locked is not None:
             self._attr_is_locked = locked
             self._state_source = (
-                self._lock_state.get("state_source") or "tuya_lock_motor_state"
+                state_source or "tuya_lock_motor_state"
             )
+            return
+
+        if (
+            state_confidence == "command_assumed"
+            and state_source == "remote_unlock_control"
+            and locked is False
+            and last_operation.get("source") == "remote_unlock_control"
+            and self._operation_is_newer_than_manual_update(last_operation)
+        ):
+            self._attr_is_locked = False
+            self._state_source = "remote_unlock_control"
 
     async def async_lock(self, **kwargs) -> None:
         """Manually mark the physical lock as locked."""
@@ -491,3 +512,17 @@ class TuyaSmartLockPhysicalStatus(LockEntity, RestoreEntity):
         self._state_source = "manual"
         self._last_manual_update = int(time.time() * 1000)
         self.async_write_ha_state()
+
+    def _operation_is_newer_than_manual_update(self, operation: dict) -> bool:
+        """Return whether a runtime operation should override manual status."""
+        if self._last_manual_update is None:
+            return True
+
+        event_time = operation.get("event_time")
+        if event_time is None:
+            return False
+
+        try:
+            return int(event_time) > self._last_manual_update
+        except (TypeError, ValueError):
+            return False
