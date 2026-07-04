@@ -328,7 +328,7 @@ class TuyaCloudApi:
 
         return sorted(
             logs,
-            key=lambda log: self._event_time_ms(log.get("event_time")),
+            key=self._log_event_time_ms,
             reverse=True,
         )
 
@@ -362,6 +362,23 @@ class TuyaCloudApi:
         if event_time < 1_000_000_000_000:
             return event_time * 1000
         return event_time
+
+    def _log_event_time_ms(self, log: dict[str, Any]) -> int:
+        """Return a timestamp from common Tuya report log field names."""
+        for key in (
+            "event_time",
+            "eventTime",
+            "time",
+            "timestamp",
+            "report_time",
+            "reportTime",
+            "gmt_create",
+            "gmtCreate",
+        ):
+            event_time = self._event_time_ms(log.get(key))
+            if event_time > 0:
+                return event_time
+        return 0
 
     def _decode_base64_json(self, value: Any) -> dict[str, Any] | None:
         """Decode a Tuya raw base64 JSON payload when possible."""
@@ -433,7 +450,7 @@ class TuyaCloudApi:
         for log in logs:
             code = log.get("code")
             value = log.get("value")
-            event_time = self._event_time_ms(log.get("event_time"))
+            event_time = self._log_event_time_ms(log)
 
             if code == "doorbell" and state["doorbell"] is None:
                 state["doorbell"] = value
@@ -458,6 +475,8 @@ class TuyaCloudApi:
             if code == "initiative_message":
                 initiative_active, decoded = self._is_active_initiative_message(value)
                 state["initiative_message_decoded"] = decoded
+                if event_time == 0 and decoded:
+                    event_time = self._event_time_ms(decoded.get("time"))
 
             if (
                 event_time > 0
