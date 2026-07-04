@@ -138,7 +138,7 @@ class TuyaCloudApi:
         if not params:
             return path
 
-        query = urlencode(sorted(params.items()))
+        query = urlencode(sorted(params.items()), safe=",")
         return f"{path}?{query}"
 
     async def _request(
