@@ -115,7 +115,8 @@ class TuyaSmartLock(LockEntity):
 
         self._sync_from_runtime()
         return {
-            "unlock_available": self._attr_available,
+            "unlock_available": self._unlock_available(),
+            "lock_available": self._lock_available(),
             "call_active": self._request_state.get("active"),
             "call_active_diagnostic_status": self._request_state.get(
                 "diagnostic_status"
@@ -128,6 +129,8 @@ class TuyaSmartLock(LockEntity):
                 "seconds_since_event"
             ),
             "lock_motor_state": self._lock_state.get("lock_motor_state"),
+            "state_source": self._lock_state.get("state_source"),
+            "state_confidence": self._lock_state.get("state_confidence"),
             "lock_report_log_error": self._lock_state.get("lock_report_log_error"),
             "lock_report_log_count": self._lock_state.get("lock_report_log_count"),
             "last_lock_operation": self._lock_state.get("last_lock_operation"),
@@ -173,7 +176,9 @@ class TuyaSmartLock(LockEntity):
         self._attr_is_locking = True
         self.async_write_ha_state()
 
-        success = await self._api.async_lock(self._device_id)
+        success = False
+        if await self._async_can_lock():
+            success = await self._api.async_lock(self._device_id)
 
         self._attr_is_locking = False
         if success:
@@ -220,6 +225,21 @@ class TuyaSmartLock(LockEntity):
 
         return True
 
+    async def _async_can_lock(self) -> bool:
+        """Check whether locking is allowed for this lock."""
+        if self._device_category != "jtmspro":
+            return True
+
+        online, _call_active = self._sync_from_runtime()
+        if online is not True:
+            _LOGGER.warning(
+                "Refusing to lock %s because jtmspro device is not online",
+                self._device_id,
+            )
+            return False
+
+        return True
+
     def _sync_from_runtime(self) -> tuple[bool | None, bool | None]:
         """Sync lock availability from the shared runtime."""
         if self._device_category != "jtmspro":
@@ -228,7 +248,10 @@ class TuyaSmartLock(LockEntity):
 
         if self._runtime is None:
             self._attr_available = False
-            self._request_state = {"active": False, "diagnostic_status": "no_runtime"}
+            self._request_state = {
+                "active": False,
+                "diagnostic_status": "no_runtime",
+            }
             self._lock_state = {}
             return None, False
 
@@ -239,8 +262,21 @@ class TuyaSmartLock(LockEntity):
         locked = self._lock_state.get("locked")
         if locked is not None:
             self._attr_is_locked = locked
-        self._attr_available = online is True and call_active is True
+        else:
+            self._attr_is_locked = None
+        self._attr_available = online is True
         return online, call_active
+
+    def _unlock_available(self) -> bool:
+        """Return whether the unlock command should be accepted."""
+        return self._runtime is not None and (
+            self._runtime.state.online is True
+            and self._request_state.get("active") is True
+        )
+
+    def _lock_available(self) -> bool:
+        """Return whether the lock command should be accepted."""
+        return self._runtime is not None and self._runtime.state.online is True
 
     def _record_successful_operation(
         self,
@@ -257,7 +293,13 @@ class TuyaSmartLock(LockEntity):
             "event_time": event_time,
             "value": None,
         }
-        self._lock_state = {**self._lock_state, "last_lock_operation": operation}
+        self._lock_state = {
+            **self._lock_state,
+            "locked": locked,
+            "state_source": source,
+            "state_confidence": "command_assumed",
+            "last_lock_operation": operation,
+        }
 
         if self._runtime is not None:
             self._runtime.record_home_assistant_operation(action, locked, source)

@@ -543,25 +543,45 @@ class TuyaCloudApi:
         file_type: int = 1,
     ) -> dict | None:
         """Get latest lock media URL metadata for investigation."""
+        resp = await self.async_get_latest_media_response(device_id, file_type)
+
+        if not resp.get("success"):
+            return None
+
+        return resp.get("result")
+
+    async def async_get_latest_media_response(
+        self,
+        device_id: str,
+        file_type: int = 1,
+    ) -> dict:
+        """Get the raw latest lock media URL response."""
         path = LATEST_MEDIA_ENDPOINT.format(device_id=device_id)
         resp = await self._request("GET", path, params={"file_type": file_type})
 
         if not resp.get("success"):
             _LOGGER.warning("Could not get latest media URL: %s", resp.get("msg"))
+
+        return resp
+
+    async def async_get_albums_media(self, device_id: str) -> dict | None:
+        """Get albums media metadata for investigation."""
+        resp = await self.async_get_albums_media_response(device_id)
+
+        if not resp.get("success"):
             return None
 
         return resp.get("result")
 
-    async def async_get_albums_media(self, device_id: str) -> dict | None:
-        """Get albums media metadata for investigation."""
+    async def async_get_albums_media_response(self, device_id: str) -> dict:
+        """Get the raw albums media response."""
         path = ALBUMS_MEDIA_ENDPOINT.format(device_id=device_id)
         resp = await self._request("GET", path)
 
         if not resp.get("success"):
             _LOGGER.warning("Could not get albums media: %s", resp.get("msg"))
-            return None
 
-        return resp.get("result")
+        return resp
 
     async def async_get_auto_lock_time(self, device_id: str) -> int | None:
         """Get the auto-lock delay in seconds from device status."""
@@ -606,6 +626,8 @@ class TuyaCloudApi:
         return {
             "locked": locked,
             "lock_motor_state": raw_state,
+            "state_source": LOCK_MOTOR_STATE_CODE if locked is not None else None,
+            "state_confidence": "physical_dp" if locked is not None else "unknown",
             "last_lock_operation": None,
             "lock_report_log_error": None,
             "lock_report_log_count": None,
