@@ -2,32 +2,154 @@
 
 from __future__ import annotations
 
+import base64
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import timedelta
-import inspect
 import json
 import logging
 import time
 from typing import Any
+from urllib.parse import urlsplit
+import uuid
 
 from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
 from homeassistant.helpers.event import async_call_later, async_track_time_interval
 
-from .const import CONF_ACCESS_ID, CONF_ACCESS_SECRET, CONF_API_REGION
 from .tuya_api import JTMSPRO_REQUEST_WINDOW, TuyaCloudApi
 
 _LOGGER = logging.getLogger(__name__)
 
 FALLBACK_INTERVAL = timedelta(seconds=60)
-REQUEST_EVENT_CODES = {"doorbell", "initiative_message", "video_request_realtime"}
-ONLINE_CODES = {"online", "device_online", "net_state", "connectivity"}
-MQ_ENDPOINTS = {
-    "eu": "https://openapi.tuyaeu.com",
-    "us": "https://openapi.tuyaus.com",
-    "cn": "https://openapi.tuyacn.com",
-    "in": "https://openapi.tuyain.com",
+REQUEST_EVENT_CODES = {
+    "doorbell",
+    "initiative_message",
+    "video_request_realtime",
+    "photo_again",
 }
+ONLINE_CODES = {"online", "device_online", "net_state", "connectivity"}
+GCM_TAG_LENGTH = 16
+
+
+class DeviceStatusNotificationClient:
+    """Tuya Device Status Notification MQTT client for custom cloud auth."""
+
+    def __init__(
+        self,
+        api: TuyaCloudApi,
+        uid: str,
+        message_callback: Callable[[dict[str, Any]], None],
+    ) -> None:
+        self._api = api
+        self._uid = uid
+        self._message_callback = message_callback
+        self._client: Any = None
+        self._password = ""
+        self._source_topic: Any = {}
+        self._expire_time = 0
+        self._link_id = f"smart-conlock-tuya.{uuid.uuid1()}"
+
+    @property
+    def expire_time(self) -> int:
+        """Return MQTT config expiry in seconds."""
+        return self._expire_time
+
+    async def async_start(self, hass: HomeAssistant) -> None:
+        """Fetch MQTT config and connect."""
+        config = await self._api.async_get_open_hub_access_config(
+            self._uid,
+            self._link_id,
+        )
+        if config is None:
+            raise ConnectionError("Open Hub access config unavailable")
+
+        await hass.async_add_executor_job(self._start, config)
+
+    async def async_stop(self, hass: HomeAssistant) -> None:
+        """Disconnect the MQTT client."""
+        await hass.async_add_executor_job(self._stop)
+
+    def _start(self, config: dict[str, Any]) -> None:
+        """Start paho-mqtt from a worker thread."""
+        from paho.mqtt import client as mqtt  # type: ignore
+
+        self._password = config.get("password", "")
+        self._source_topic = config.get("source_topic", {})
+        self._expire_time = int(config.get("expire_time") or 0)
+
+        client_id = config.get("client_id", "")
+        try:
+            mqttc = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1, client_id)
+        except AttributeError:
+            mqttc = mqtt.Client(client_id)
+        mqttc.username_pw_set(config.get("username", ""), self._password)
+        mqttc.on_connect = self._on_connect
+        mqttc.on_message = self._on_message
+        mqttc.on_disconnect = self._on_disconnect
+
+        url = urlsplit(config.get("url", ""))
+        if url.scheme == "ssl":
+            mqttc.tls_set()
+        if not url.hostname or not url.port:
+            raise ConnectionError(f"Invalid MQTT URL: {config.get('url')}")
+
+        mqttc.connect(url.hostname, url.port)
+        mqttc.loop_start()
+        self._client = mqttc
+
+    def _stop(self) -> None:
+        """Stop paho-mqtt."""
+        if self._client is None:
+            return
+        self._client.loop_stop()
+        self._client.disconnect()
+        self._client = None
+
+    def _on_connect(self, mqttc: Any, _userdata: Any, _flags: Any, rc: int) -> None:
+        """Subscribe to device topics after connecting."""
+        if rc != 0:
+            _LOGGER.warning("Tuya Device Status Notification connect failed: %s", rc)
+            return
+
+        for topic in _iter_topics(self._source_topic):
+            mqttc.subscribe(topic)
+
+    def _on_disconnect(self, _mqttc: Any, _userdata: Any, rc: int) -> None:
+        """Log unexpected disconnects."""
+        if rc != 0:
+            _LOGGER.warning("Tuya Device Status Notification disconnected: %s", rc)
+
+    def _on_message(self, _mqttc: Any, _userdata: Any, msg: Any) -> None:
+        """Decode and forward MQTT messages."""
+        try:
+            msg_dict = json.loads(msg.payload.decode("utf8"))
+            event_time = msg_dict.get("t", "")
+            decoded_data = self._decode_message(
+                msg_dict["data"],
+                self._password,
+                event_time,
+            )
+            msg_dict["data"] = decoded_data
+            self._message_callback(msg_dict)
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.warning("Could not decode Tuya notification message: %s", err)
+
+    def _decode_message(self, b64msg: str, password: str, event_time: Any) -> Any:
+        """Decode Tuya custom Open Hub AES-GCM payloads."""
+        from Crypto.Cipher import AES  # type: ignore
+
+        key = password[8:24]
+        buffer = base64.b64decode(b64msg)
+        iv_length = int.from_bytes(buffer[0:4], byteorder="big")
+        iv_buffer = buffer[4 : iv_length + 4]
+        data_buffer = buffer[iv_length + 4 : len(buffer) - GCM_TAG_LENGTH]
+        tag_buffer = buffer[len(buffer) - GCM_TAG_LENGTH :]
+        aad_buffer = str(event_time).encode("utf8")
+
+        cipher = AES.new(key.encode("utf8"), AES.MODE_GCM, nonce=iv_buffer)
+        cipher.update(aad_buffer)
+        plaintext = cipher.decrypt_and_verify(data_buffer, tag_buffer).decode("utf8")
+        return json.loads(plaintext)
 
 
 @dataclass
@@ -48,6 +170,7 @@ class SmartConlockRuntimeState:
     last_event_value: Any = None
     doorbell: Any = None
     video_request_realtime: Any = None
+    photo_again: Any = None
     initiative_message_decoded: dict[str, Any] | None = None
 
     def request_state(self) -> dict[str, Any]:
@@ -74,6 +197,7 @@ class SmartConlockRuntimeState:
             "request_expires_in": expires_in,
             "doorbell": self.doorbell,
             "video_request_realtime": self.video_request_realtime,
+            "photo_again": self.photo_again,
             "initiative_message_decoded": self.initiative_message_decoded,
             "last_event_code": self.last_event_code,
             "last_event_value": self.last_event_value,
@@ -98,8 +222,8 @@ class SmartConlockRuntime:
         self._listeners: list[Callable[[], None]] = []
         self._unsub_fallback: CALLBACK_TYPE | None = None
         self._unsub_expiry: CALLBACK_TYPE | None = None
-        self._mq: Any = None
-        self._mq_listener: Callable[[Any], None] | None = None
+        self._unsub_mq_refresh: CALLBACK_TYPE | None = None
+        self._mq: DeviceStatusNotificationClient | None = None
 
     async def async_start(self) -> None:
         """Start runtime services."""
@@ -119,6 +243,9 @@ class SmartConlockRuntime:
         if self._unsub_expiry:
             self._unsub_expiry()
             self._unsub_expiry = None
+        if self._unsub_mq_refresh:
+            self._unsub_mq_refresh()
+            self._unsub_mq_refresh = None
         await self._async_stop_mq()
         self._listeners.clear()
 
@@ -185,13 +312,15 @@ class SmartConlockRuntime:
             self.state.video_request_realtime = request_state.get(
                 "video_request_realtime"
             )
+        if request_state.get("photo_again") is not None:
+            self.state.photo_again = request_state.get("photo_again")
         if request_state.get("initiative_message_decoded") is not None:
             self.state.initiative_message_decoded = request_state.get(
                 "initiative_message_decoded"
             )
 
-        if request_state.get("active") is True:
-            event_time = request_state.get("last_event_time")
+        event_time = request_state.get("last_event_time")
+        if request_state.get("active") is True and event_time:
             self._activate_request(
                 source=request_state.get("source") or "report_logs",
                 value=None,
@@ -216,6 +345,7 @@ class SmartConlockRuntime:
             code = event.get("code")
             value = event.get("value")
             event_time = event.get("event_time")
+            has_event_time = event_time not in (None, "", 0, "0")
 
             if code in ONLINE_CODES:
                 online = self.api.is_call_active_value(value)
@@ -229,18 +359,18 @@ class SmartConlockRuntime:
 
             self.state.last_event_code = code
             self.state.last_event_value = value
-            if event_time:
+            if has_event_time:
                 self.state.last_event_time = self.api._event_time_ms(event_time)
 
             if code == "doorbell":
                 self.state.doorbell = value
-                if self.api._is_active_doorbell_value(value):
+                if has_event_time and self.api._is_active_doorbell_value(value):
                     self._activate_request(code, value, event_time, notify=False)
                     changed = True
             elif code == "initiative_message":
                 active, decoded = self.api._is_active_initiative_message(value)
                 self.state.initiative_message_decoded = decoded
-                if active:
+                if has_event_time and active:
                     self._activate_request(code, value, event_time, notify=False)
                     changed = True
             elif code == "video_request_realtime":
@@ -250,6 +380,18 @@ class SmartConlockRuntime:
                     if not self.state.request_active
                     else self.state.diagnostic_status
                 )
+                changed = True
+            elif code == "photo_again":
+                self.state.photo_again = value
+                self.state.diagnostic_status = (
+                    "photo_again_observed"
+                    if not self.state.request_active
+                    else self.state.diagnostic_status
+                )
+                changed = True
+
+            if not has_event_time and code in {"doorbell", "initiative_message"}:
+                self.state.diagnostic_status = "untimed_event_ignored"
                 changed = True
 
         if changed:
@@ -299,90 +441,84 @@ class SmartConlockRuntime:
         self.async_notify_listeners()
 
     async def _async_start_mq(self) -> None:
-        """Start Tuya OpenMQ listener if the SDK is available."""
+        """Start Tuya Device Status Notification MQTT client."""
         try:
-            from tuya_iot import AuthType, TuyaOpenAPI, TuyaOpenMQ  # type: ignore
-        except ImportError as err:
-            try:
-                from tuya_iot import TuyaOpenAPI, TuyaOpenMQ  # type: ignore
+            uid = await self._async_resolve_uid()
+            if not uid:
+                raise ConnectionError("Tuya uid unavailable")
 
-                AuthType = None
-            except ImportError:
-                self.state.last_error = f"tuya_iot_import_failed: {err}"
-                self.state.diagnostic_status = "push_unavailable"
-                return
-
-        endpoint = MQ_ENDPOINTS.get(
-            self.entry_data.get(CONF_API_REGION),
-            self.api.base_url,
-        )
-        access_id = self.entry_data[CONF_ACCESS_ID]
-        access_secret = self.entry_data[CONF_ACCESS_SECRET]
-
-        try:
-            auth_type = getattr(AuthType, "CUSTOM", None) if AuthType else None
-            if auth_type is not None:
-                openapi = TuyaOpenAPI(
-                    endpoint,
-                    access_id,
-                    access_secret,
-                    auth_type,
-                )
-            else:
-                openapi = TuyaOpenAPI(endpoint, access_id, access_secret)
-            connect = getattr(openapi, "connect", None)
-            if callable(connect):
-                await self._async_run_sdk_call(connect)
-
-            self._mq = TuyaOpenMQ(openapi)
-            self._mq_listener = self._handle_mq_message_threadsafe
-            self._mq.add_message_listener(self._mq_listener)
-            await self._async_run_sdk_call(self._mq.start)
+            self._mq = DeviceStatusNotificationClient(
+                self.api,
+                uid,
+                self._handle_mq_message_threadsafe,
+            )
+            await self._mq.async_start(self.hass)
             self.state.diagnostic_status = "push_connected"
             self.state.last_error = None
+            self._schedule_mq_refresh()
             self.async_notify_listeners()
         except Exception as err:  # noqa: BLE001
             self._mq = None
-            self._mq_listener = None
             self.state.last_error = f"push_start_failed: {err}"
             self.state.diagnostic_status = "push_unavailable"
             _LOGGER.warning("Could not start Tuya Device Status Notification: %s", err)
             self.async_notify_listeners()
 
     async def _async_stop_mq(self) -> None:
-        """Stop Tuya OpenMQ listener."""
+        """Stop Tuya Device Status Notification MQTT client."""
         mq = self._mq
         if mq is None:
             return
 
         try:
-            if self._mq_listener is not None:
-                remove_listener = getattr(mq, "remove_message_listener", None)
-                if callable(remove_listener):
-                    await self._async_run_sdk_call(remove_listener, self._mq_listener)
-            stop = getattr(mq, "stop", None)
-            if callable(stop):
-                await self._async_run_sdk_call(stop)
+            await mq.async_stop(self.hass)
         except Exception as err:  # noqa: BLE001
             _LOGGER.warning("Could not stop Tuya Device Status Notification: %s", err)
         finally:
             self._mq = None
-            self._mq_listener = None
 
     def _handle_mq_message_threadsafe(self, message: Any) -> None:
-        """Bridge OpenMQ callbacks into the Home Assistant event loop."""
+        """Bridge MQTT callbacks into the Home Assistant event loop."""
         self.hass.loop.call_soon_threadsafe(
             lambda: self.hass.async_create_task(self.async_handle_message(message))
         )
 
-    async def _async_run_sdk_call(self, func: Callable, *args: Any) -> Any:
-        """Run a Tuya SDK call without blocking the Home Assistant event loop."""
-        if inspect.iscoroutinefunction(func):
-            return await func(*args)
-        result = await self.hass.async_add_executor_job(func, *args)
-        if inspect.isawaitable(result):
-            return await result
-        return result
+    async def _async_resolve_uid(self) -> str | None:
+        """Resolve the Tuya uid needed by Open Hub access config."""
+        if self.api.uid:
+            return self.api.uid
+
+        device_info = await self.api.async_get_device_info(self.device_id)
+        if not device_info:
+            return None
+        uid = device_info.get("uid")
+        return uid if isinstance(uid, str) and uid else None
+
+    @callback
+    def _schedule_mq_refresh(self) -> None:
+        """Refresh MQTT access config before it expires."""
+        if self._unsub_mq_refresh:
+            self._unsub_mq_refresh()
+            self._unsub_mq_refresh = None
+        if self._mq is None or self._mq.expire_time <= 60:
+            return
+
+        self._unsub_mq_refresh = async_call_later(
+            self.hass,
+            self._mq.expire_time - 60,
+            self._restart_mq,
+        )
+
+    @callback
+    def _restart_mq(self, _now: Any = None) -> None:
+        """Restart MQTT after access config expires."""
+        self._unsub_mq_refresh = None
+        self.hass.async_create_task(self._async_restart_mq())
+
+    async def _async_restart_mq(self) -> None:
+        """Restart MQTT client."""
+        await self._async_stop_mq()
+        await self._async_start_mq()
 
 
 def iter_device_status_events(message: Any) -> list[dict[str, Any]]:
@@ -531,3 +667,14 @@ def _first_present(payload: dict[str, Any], *keys: str) -> Any:
 def _event_value(payload: dict[str, Any]) -> Any:
     """Return a status value from common Tuya keys."""
     return _first_present(payload, "value", "dpValue", "dp_value")
+
+
+def _iter_topics(source_topic: Any) -> list[str]:
+    """Return MQTT topics from common Tuya config shapes."""
+    if isinstance(source_topic, dict):
+        return [topic for topic in source_topic.values() if isinstance(topic, str)]
+    if isinstance(source_topic, list):
+        return [topic for topic in source_topic if isinstance(topic, str)]
+    if isinstance(source_topic, str):
+        return [source_topic]
+    return []

@@ -21,7 +21,7 @@ Smart (Con)lock tuya uses the Cloud API ticket-based flow to send lock/unlock co
 | Lock | `lock` | Lock and unlock your door via Tuya Cloud API |
 | Battery | `sensor` | Shows the raw Tuya battery enum (`high`, `medium`, `low`, `poweroff`) and an estimated percentage attribute |
 | Online | `binary_sensor` | Shows whether a `jtmspro` device is online |
-| Video Call Request | `binary_sensor` | Shows whether a recent `jtmspro` doorbell/video request was detected from Tuya Device Status Notification |
+| Call Active | `binary_sensor` | Shows whether a recent `jtmspro` doorbell/video request opened the unlock window |
 
 The lock entity is linked to your existing Tuya device in Home Assistant. It appears alongside the `binary_sensor` from the official Tuya integration, all grouped under the same device.
 
@@ -131,13 +131,13 @@ It also exposes `battery_percent_estimate`:
 For category `jtmspro`, the integration adds:
 
 - `binary_sensor.<lock_name>_online`
-- `binary_sensor.<lock_name>_video_call_request`
+- `binary_sensor.<lock_name>_call_active`
 
 The online sensor uses Tuya Device Status Notification when available, with slow REST refresh from `GET /v1.0/devices/{device_id}` as fallback.
 
-The video call request sensor is event-driven. It listens for Tuya Device Status Notification messages for `doorbell` and `initiative_message`, and opens a 90-second unlock window when a valid request arrives. `video_request_realtime` is exposed as debugging evidence only until real-device start/end behavior is confirmed.
+The Call Active sensor is event-driven. It listens for Tuya Device Status Notification messages for `doorbell` and `initiative_message`, and opens a 90-second unlock window when a valid request arrives. `video_request_realtime` and `photo_again` are exposed as debugging evidence only until real-device start/end behavior is confirmed.
 
-Recent Tuya report logs are kept as a slow 60-second fallback/debug path. If push or report-log fallback cannot be read, the Video Call Request sensor exposes `diagnostic_status`, `last_error`, and `report_log_error` attributes.
+Recent Tuya report logs are kept as a slow 60-second fallback/debug path. If push or report-log fallback cannot be read, the Call Active sensor exposes `diagnostic_status`, `last_error`, and `report_log_error` attributes.
 
 Unlock protection for `jtmspro`:
 
@@ -191,7 +191,7 @@ If your lock device uses the Tuya ticket-based unlock flow, it should work. If i
 | `permission deny` | Your Smart Life / Tuya app account is not linked to the IoT project. See Prerequisites step 2. |
 | No devices found during setup | Make sure your app account is linked and your device is a supported lock category. |
 | Unlock command succeeds but door doesn't open | Enable Remote Unlock in the Tuya / Smart Life app settings for your device. |
-| `jtmspro` unlock is refused | Make sure the lock is online and that a recent doorbell/video request is active. Check the Video Call Request sensor attributes for `diagnostic_status`, `report_log_error`, and raw datapoint values. |
+| `jtmspro` unlock is refused | Make sure the lock is online and that a recent doorbell/video request is active. Check the Call Active sensor attributes for `diagnostic_status`, `report_log_error`, and raw datapoint values. |
 | No video stream or media URL | Confirm your Tuya project has the required video/media API services enabled and test the endpoint in Tuya API Explorer. |
 | `invalid_auth` during setup | Double-check your Access ID and Access Secret. Make sure you're using the credentials from the correct project. |
 

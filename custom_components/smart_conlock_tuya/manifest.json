@@ -6,6 +6,6 @@
   "documentation": "https://github.com/batty211/smartlock-tuya",
   "iot_class": "cloud_push",
   "issue_tracker": "https://github.com/batty211/smartlock-tuya/issues",
-  "requirements": ["tuya-iot-py-sdk==0.6.6"],
+  "requirements": ["paho-mqtt>=1.6.1", "pycryptodome>=3.15.0"],
   "version": "1.0.0"
 }

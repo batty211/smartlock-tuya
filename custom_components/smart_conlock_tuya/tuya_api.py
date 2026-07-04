@@ -21,6 +21,7 @@ from .const import (
     DOOR_OPERATE_ENDPOINT,
     LATEST_MEDIA_ENDPOINT,
     LOCK_CATEGORIES,
+    OPEN_HUB_ACCESS_CONFIG_ENDPOINT,
     REPORT_LOGS_ENDPOINT,
     REMOTE_UNLOCKS_ENDPOINT,
     SPECIFICATIONS_ENDPOINT,
@@ -38,6 +39,7 @@ JTMSPRO_REQUEST_CODES = [
     "doorbell",
     "initiative_message",
     "video_request_realtime",
+    "photo_again",
 ]
 JTMSPRO_REQUEST_WINDOW = 90
 
@@ -58,6 +60,11 @@ class TuyaCloudApi:
     def base_url(self) -> str:
         """Return the Tuya Cloud base URL."""
         return self._base_url
+
+    @property
+    def uid(self) -> str | None:
+        """Return the current Tuya user ID from the access token."""
+        return self._uid
 
     async def _ensure_token(self) -> None:
         """Get or refresh the access token."""
@@ -209,6 +216,31 @@ class TuyaCloudApi:
             return None
 
         return device_info.get("online")
+
+    async def async_get_open_hub_access_config(
+        self,
+        uid: str,
+        link_id: str,
+    ) -> dict[str, Any] | None:
+        """Get Tuya Device Status Notification MQTT connection details."""
+        resp = await self._request(
+            "POST",
+            OPEN_HUB_ACCESS_CONFIG_ENDPOINT,
+            {
+                "uid": uid,
+                "link_id": link_id,
+                "link_type": "mqtt",
+                "topics": "device",
+                "msg_encrypted_version": "2.0",
+            },
+        )
+
+        if not resp.get("success"):
+            _LOGGER.warning("Could not get Open Hub MQTT config: %s", resp.get("msg"))
+            return None
+
+        result = resp.get("result")
+        return result if isinstance(result, dict) else None
 
     async def async_get_status_map(self, device_id: str) -> dict[str, Any]:
         """Get the latest device status as a mapping from DP code to value."""
@@ -365,6 +397,7 @@ class TuyaCloudApi:
             "seconds_since_event": None,
             "doorbell": None,
             "video_request_realtime": None,
+            "photo_again": None,
             "initiative_message_decoded": None,
         }
         if logs is None:
@@ -382,6 +415,8 @@ class TuyaCloudApi:
                 and state["video_request_realtime"] is None
             ):
                 state["video_request_realtime"] = value
+            elif code == "photo_again" and state["photo_again"] is None:
+                state["photo_again"] = value
             elif (
                 code == "initiative_message"
                 and state["initiative_message_decoded"] is None
@@ -398,8 +433,11 @@ class TuyaCloudApi:
                 state["initiative_message_decoded"] = decoded
 
             if (
-                (code == "doorbell" and self._is_active_doorbell_value(value))
-                or initiative_active
+                event_time > 0
+                and (
+                    (code == "doorbell" and self._is_active_doorbell_value(value))
+                    or initiative_active
+                )
             ):
                 state["active"] = True
                 state["diagnostic_status"] = "recent_request_detected"

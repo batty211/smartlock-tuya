@@ -110,7 +110,7 @@ class TuyaSmartLockOnlineSensor(TuyaSmartLockBinarySensor):
 class TuyaSmartLockCallActiveSensor(TuyaSmartLockBinarySensor):
     """Video call/session state sensor for a Tuya smart lock."""
 
-    _attr_name = "Video Call Request"
+    _attr_name = "Call Active"
     _attr_icon = "mdi:video"
 
     def __init__(
@@ -120,7 +120,7 @@ class TuyaSmartLockCallActiveSensor(TuyaSmartLockBinarySensor):
         device_name: str,
     ) -> None:
         super().__init__(runtime, device_id, device_name)
-        self._attr_unique_id = f"smart_conlock_tuya_{device_id}_video_call_request"
+        self._attr_unique_id = f"smart_conlock_tuya_{device_id}_call_active"
         self._request_state = {}
 
     @property
@@ -144,6 +144,7 @@ class TuyaSmartLockCallActiveSensor(TuyaSmartLockBinarySensor):
             "video_request_realtime": self._request_state.get(
                 "video_request_realtime"
             ),
+            "photo_again": self._request_state.get("photo_again"),
             "initiative_message_decoded": self._request_state.get(
                 "initiative_message_decoded"
             ),
