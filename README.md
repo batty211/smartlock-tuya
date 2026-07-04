@@ -4,213 +4,202 @@
 [![GitHub Release](https://img.shields.io/github/v/release/batty211/smartlock-tuya?style=flat-square)](https://github.com/batty211/smartlock-tuya/releases)
 [![License](https://img.shields.io/github/license/batty211/smartlock-tuya?style=flat-square)](LICENSE)
 
-**Control your Tuya smart lock directly from Home Assistant.**
+Integration สำหรับควบคุม Smart Lock ของ Tuya ผ่าน Home Assistant โดยใช้ Tuya Cloud API
 
-The official Tuya integration doesn't support lock/unlock — it only exposes a binary sensor (open/closed state). This integration fills the gap by using the Tuya Smart Lock Cloud API to add a proper `lock` entity with lock/unlock control, battery status, and extra support for `jtmspro` video smart locks.
+เหมาะกับคนที่ใช้ Tuya / Smart Life แล้ว Home Assistant เห็นอุปกรณ์ล็อกเป็นแค่ sensor หรือกดปลดล็อกจาก Home Assistant ไม่ได้ Integration นี้เพิ่ม entity สำหรับสั่งปลดล็อก, ดูแบตเตอรี่, ดูสถานะออนไลน์ และรองรับล็อกวิดีโอประเภท `jtmspro` เช่น Conlock / video smart lock
 
-## Why this integration?
+## สิ่งที่จะได้ใน Home Assistant
 
-The official Home Assistant Tuya integration uses the `tuya-device-sharing-sdk` which does not implement the Smart Lock API. Lock devices (categories `mk`, `ms`, `jtmsbh`, etc.) only get a `binary_sensor` with no control capability.
+| Entity | ใช้ทำอะไร |
+|--------|------------|
+| `lock.<ชื่ออุปกรณ์>` | ปุ่มสั่งล็อก/ปลดล็อก สำหรับอุปกรณ์ทั่วไป หรือปุ่มสั่งปลดล็อกสำหรับ `jtmspro` |
+| `sensor.<ชื่ออุปกรณ์>_battery` | สถานะแบตเตอรี่จาก Tuya |
+| `binary_sensor.<ชื่ออุปกรณ์>_online` | สถานะออนไลน์ของอุปกรณ์ `jtmspro` |
+| `binary_sensor.<ชื่ออุปกรณ์>_call_active` | แสดงว่าตอนนี้มีคำขอ/กริ่ง/วิดีโอคอลที่อนุญาตให้กดปลดล็อกหรือไม่ |
+| `lock.<ชื่ออุปกรณ์>_physical_status` | สถานะล็อกจริงของประตูสำหรับ `jtmspro` ใช้ดูหรือปรับเองใน Home Assistant |
+| `image.<ชื่ออุปกรณ์>_latest_image` | รูปล่าสุดจากกริ่ง/วิดีโอคอล ถ้า Tuya ส่ง URL รูปที่ใช้งานได้ |
 
-Smart (Con)lock tuya uses the Cloud API ticket-based flow to send lock/unlock commands — the same mechanism the Tuya and Smart Life mobile apps use.
+## การใช้งานกับล็อก `jtmspro`
 
-## What you get
+สำหรับล็อกวิดีโออย่าง `jtmspro` ตัวล็อกมักปลดล็อกผ่าน Cloud ได้ แต่สั่งล็อกกลับไม่ได้ และบางรุ่นไม่ส่งสถานะจริงว่าในตอนนี้ประตูล็อกอยู่หรือปลดล็อกอยู่ Integration จึงแยกเป็น 2 entity:
 
-| Entity | Type | What it does |
-|--------|------|--------------|
-| Lock | `lock` | Lock and unlock your door via Tuya Cloud API |
-| Battery | `sensor` | Shows the raw Tuya battery enum (`high`, `medium`, `low`, `poweroff`) and an estimated percentage attribute |
-| Online | `binary_sensor` | Shows whether a `jtmspro` device is online |
-| Call Active | `binary_sensor` | Shows whether a recent `jtmspro` doorbell/video request opened the unlock window |
-| Latest Image | `image` | Shows the latest still image for `jtmspro` video locks when Tuya returns a usable media URL |
+### 1. `lock.<ชื่ออุปกรณ์>`
 
-The lock entity is linked to your existing Tuya device in Home Assistant. It appears alongside the `binary_sensor` from the official Tuya integration, all grouped under the same device.
+ตัวนี้คือปุ่มสั่งปลดล็อกเท่านั้น
 
-For `jtmspro` devices, unlock is blocked unless the device is online and an active video call/session is detected. This is intentionally conservative for video locks.
+- ปุ่มนี้จะแสดง action เป็น **Unlock** เสมอ
+- ถ้าไม่มีคนกดกริ่ง/ไม่มี video call ล่าสุด ปุ่มจะถูกปิดไว้เพื่อกันการกดปลดล็อกมั่ว
+- ถ้าอุปกรณ์ออนไลน์และมี `Call Active` อยู่ ปุ่มจะกดได้
+- เมื่อกดสำเร็จ Integration จะส่งคำสั่งปลดล็อกไปที่ Tuya
+- ปุ่มนี้ไม่ใช่สถานะล็อกจริงของประตู
 
-Lock state is also conservative. If Tuya exposes a real `lock_motor_state` status for your device, the integration uses it. If not, Home Assistant shows the latest state the integration can actually know from its own lock/unlock commands. If your physical lock has a relock delay but Tuya does not expose it through the API, configure the same delay in the integration options.
+### 2. `lock.<ชื่ออุปกรณ์>_physical_status`
 
-## Prerequisites
+ตัวนี้คือสถานะล็อกจริงที่ใช้ดูใน Dashboard หรือใช้กับ automation
 
-Before installing, you need to set up a few things on the Tuya IoT Platform. This takes about 10 minutes.
+- กด `Lock` หรือ `Unlock` เองได้เพื่อบอก Home Assistant ว่าประตูล็อกอยู่หรือปลดล็อกอยู่
+- หลังจากสั่งปลดล็อกผ่านปุ่มหลักสำเร็จ สถานะนี้จะเปลี่ยนเป็น `unlocked`
+- ถ้าตัวล็อกส่งสถานะจริงกลับมาผ่าน Tuya ในอนาคต Integration จะใช้ค่านั้นแทน
+- ถ้าคุณกดแก้สถานะเอง การแก้ล่าสุดของคุณจะไม่ถูก event เก่าเขียนทับ
 
-### 1. Create a Tuya IoT project
+สรุปสั้น ๆ:
 
-1. Go to [iot.tuya.com](https://iot.tuya.com) and create an account (or log in)
-2. Go to **Cloud** > **Development** > **Create Cloud Project**
-3. Give it a name (e.g. "Home Assistant")
-4. Select the **Data Center** that matches your region (Western Europe, US East, etc.)
-5. For **Development Method**, select **Smart Home**
-6. Click **Create**
+- อยากเปิดประตู: กด `lock.<ชื่ออุปกรณ์>`
+- อยากดู/บอกสถานะจริงของประตู: ใช้ `lock.<ชื่ออุปกรณ์>_physical_status`
+- อยากรู้ว่าปลดล็อกได้ตอนนี้ไหม: ดู `binary_sensor.<ชื่ออุปกรณ์>_call_active`
 
-### 2. Link your Tuya / Smart Life app account
+## สิ่งที่ต้องเตรียม
 
-1. In your project, go to **Devices** > **Link Tuya App Account**
-2. Click **Add App Account**
-3. Open the Tuya or Smart Life app on your phone
-4. Go to **Me** > tap the scan icon in the top right
-5. Scan the QR code displayed on iot.tuya.com
-6. Confirm the linking in the app
-7. Your devices should now appear in the **All Devices** tab
+ก่อนติดตั้งต้องมี Tuya IoT Project และผูกบัญชี Tuya / Smart Life เข้ากับโปรเจกต์ให้เรียบร้อย
 
-### 3. Subscribe to required API services
+### 1. สร้าง Tuya IoT Project
 
-1. In your project, go to **Service API**
-2. Click **Go to Authorize** (or find the service list)
-3. Search for and subscribe to **IoT Core** (Free Trial)
-4. Search for and subscribe to **Smart Lock Open Service** (Free Trial)
-5. For `jtmspro` realtime doorbell/request detection, subscribe to **Device Status Notification**.
-6. For video lock investigation features, you may also need **IoT Video Live Stream** and **Video Cloud Storage** depending on your device and Tuya account.
+1. เข้า [iot.tuya.com](https://iot.tuya.com)
+2. ไปที่ **Cloud** > **Development** > **Create Cloud Project**
+3. เลือก Data Center ให้ตรงกับบัญชี Tuya / Smart Life ของคุณ
+4. เลือก Development Method เป็น **Smart Home**
+5. สร้างโปรเจกต์ให้เสร็จ
 
-Both services are free for personal use. They may require periodic renewal (every ~6 months) — you'll get an email when it's time.
+### 2. ผูกบัญชี Tuya / Smart Life
 
-### 4. Enable remote unlock on your device
+1. ในโปรเจกต์ Tuya IoT ไปที่ **Devices** > **Link Tuya App Account**
+2. กดเพิ่มบัญชี
+3. เปิดแอป Tuya หรือ Smart Life ในมือถือ
+4. ใช้แอปสแกน QR code จากหน้า Tuya IoT
+5. ยืนยันการผูกบัญชี
+6. ตรวจสอบว่าอุปกรณ์ล็อกโผล่ในหน้า Devices แล้ว
 
-1. Open the **Tuya** or **Smart Life** app on your phone
-2. Go to your lock device
-3. Open the device **Settings**
-4. Enable **Remote Unlock** (sometimes called "Remote Unlock Without Password")
+### 3. เปิดบริการ API ที่จำเป็น
 
-### 5. Note your credentials
+ในหน้า **Service API** ของ Tuya IoT Project ให้เปิดบริการเหล่านี้:
 
-1. Go back to [iot.tuya.com](https://iot.tuya.com) > **Cloud** > your project > **Overview**
-2. Copy your **Access ID** and **Access Secret** — you'll need them during setup
+- **IoT Core**
+- **Smart Lock Open Service**
+- **Device Status Notification** สำหรับล็อก `jtmspro`
 
-## Installation
+ถ้าต้องการดูรูปหรือสื่อจากล็อกวิดีโอ อาจต้องเปิดบริการวิดีโอ/สื่อของ Tuya เพิ่ม ขึ้นอยู่กับรุ่นและบัญชี Tuya ของคุณ
 
-### HACS (recommended)
+### 4. เปิด Remote Unlock ในแอป Tuya / Smart Life
 
-1. Open HACS in Home Assistant
-2. Click the 3 dots menu > **Custom repositories**
-3. Add `batty211/smartlock-tuya` as **Integration**
-4. Search for and install **Smart (Con)lock tuya**
+1. เปิดแอป Tuya หรือ Smart Life
+2. เข้าอุปกรณ์ล็อกของคุณ
+3. ไปที่ Settings ของอุปกรณ์
+4. เปิด **Remote Unlock** หรือ **Remote Unlock Without Password**
+
+### 5. เตรียม Access ID และ Access Secret
+
+ใน Tuya IoT Project ไปที่หน้า Overview แล้วคัดลอก:
+
+- **Access ID**
+- **Access Secret**
+
+ต้องใช้ตอนเพิ่ม Integration ใน Home Assistant
+
+## วิธีติดตั้ง
+
+### ติดตั้งผ่าน HACS
+
+1. เปิด HACS ใน Home Assistant
+2. ไปที่เมนู 3 จุด > **Custom repositories**
+3. เพิ่ม repository `batty211/smartlock-tuya` เป็นประเภท **Integration**
+4. ค้นหาและติดตั้ง **Smart (Con)lock tuya**
 5. Restart Home Assistant
-6. Go to **Settings** > **Integrations** > **Add Integration** > search for **Smart (Con)lock tuya**
+6. ไปที่ **Settings** > **Devices & services** > **Add integration**
+7. ค้นหา **Smart (Con)lock tuya**
 
-### Manual
+### ติดตั้งเอง
 
-1. Copy the `custom_components/smart_conlock_tuya` folder to your Home Assistant `custom_components/` directory
+1. คัดลอกโฟลเดอร์ `custom_components/smart_conlock_tuya` ไปไว้ใน `custom_components/` ของ Home Assistant
 2. Restart Home Assistant
-3. Go to **Settings** > **Integrations** > **Add Integration** > search for **Smart (Con)lock tuya**
+3. ไปที่ **Settings** > **Devices & services** > **Add integration**
+4. ค้นหา **Smart (Con)lock tuya**
 
-## Configuration
+## วิธีตั้งค่าใน Home Assistant
 
-The integration uses a UI-based config flow — no YAML needed.
+Integration นี้ตั้งค่าผ่านหน้าจอ Home Assistant ไม่ต้องแก้ YAML
 
-### Step 1: Enter your Tuya credentials
+1. กรอก **Access ID**
+2. กรอก **Access Secret**
+3. เลือก **API Region** ให้ตรงกับ Data Center ของ Tuya IoT Project
+4. เลือกอุปกรณ์ล็อกที่ต้องการเพิ่ม
 
-- **Access ID**: from your Tuya IoT project overview
-- **Access Secret**: from your Tuya IoT project overview
-- **API Region**: select the region matching your Tuya data center
+ถ้ามีล็อกหลายตัว ให้เพิ่ม Integration แยกตามแต่ละอุปกรณ์
 
-### Step 2: Select your device
+## แบตเตอรี่
 
-The integration will automatically discover lock devices linked to your Tuya account. Select the device you want to control.
+Entity `sensor.<ชื่ออุปกรณ์>_battery` จะแสดงค่าสถานะแบตเตอรี่จาก Tuya:
 
-If you have multiple locks, add the integration once per device.
+| ค่าใน Tuya | ความหมายโดยประมาณ |
+|------------|---------------------|
+| `high` | แบตสูง |
+| `medium` | แบตกลาง |
+| `low` | แบตต่ำ |
+| `poweroff` | แบตหมดหรืออุปกรณ์ดับ |
 
-## Battery sensor
+Entity นี้มี attribute `battery_percent_estimate` เป็นเปอร์เซ็นต์โดยประมาณ:
 
-The integration exposes `sensor.<lock_name>_battery` using the Tuya `battery_state` datapoint.
-
-The sensor state is the raw Tuya enum:
-
-- `high`
-- `medium`
-- `low`
-- `poweroff`
-
-It also exposes `battery_percent_estimate`:
-
-| Tuya state | Estimate |
-|------------|----------|
+| ค่าใน Tuya | เปอร์เซ็นต์โดยประมาณ |
+|------------|------------------------|
 | `high` | 75 |
 | `medium` | 50 |
 | `low` | 20 |
 | `poweroff` | 0 |
 
-## jtmspro video smart locks
+## รูปล่าสุดจากล็อกวิดีโอ
 
-For category `jtmspro`, the integration adds:
+สำหรับ `jtmspro` จะมี `image.<ชื่ออุปกรณ์>_latest_image`
 
-- `binary_sensor.<lock_name>_online`
-- `binary_sensor.<lock_name>_call_active`
-- `image.<lock_name>_latest_image`
+ถ้า Tuya ส่ง URL รูปที่ Home Assistant ใช้ได้ entity นี้จะแสดงรูปจากเหตุการณ์ล่าสุด เช่น คนกดกริ่งหรือเริ่มวิดีโอคอล
 
-The online sensor uses Tuya Device Status Notification when available, with slow REST refresh from `GET /v1.0/devices/{device_id}` as fallback.
+ถ้าไม่มีรูป อาจเกิดจาก:
 
-The Call Active sensor is event-driven. It listens for Tuya Device Status Notification messages for `doorbell` and `initiative_message`, and opens a 90-second unlock window when a valid request arrives. `video_request_realtime` and `photo_again` are exposed as debugging evidence only until real-device start/end behavior is confirmed.
+- Tuya ไม่ส่ง URL รูปให้บัญชีนี้
+- ต้องเปิดบริการ video/media เพิ่มใน Tuya IoT
+- สื่อถูกเข้ารหัสหรือใช้ URL ที่ Home Assistant โหลดตรงไม่ได้
+- อุปกรณ์รุ่นนั้นไม่รองรับการดึงรูปล่าสุดผ่าน API ที่เปิดอยู่
 
-Recent Tuya report logs are kept as a slow 60-second fallback/debug path. If push or report-log fallback cannot be read, the Call Active sensor exposes `diagnostic_status`, `last_error`, and `report_log_error` attributes.
+## อุปกรณ์ที่รองรับ
 
-Unlock protection for `jtmspro`:
+ทดสอบแล้วกับ:
 
-- If the device is not online, unlock is refused.
-- If no recent doorbell/video request is detected, unlock is refused and the lock entity becomes unavailable so the Home Assistant unlock button cannot be pressed.
-- Other lock categories keep the original unlock behavior.
+- Tuya Access Control category `mk`
+- `jtmspro` video smart lock / Conlock ตามการใช้งานใน fork นี้
 
-Lock state for `jtmspro`:
+ควรใช้ได้กับอุปกรณ์ล็อก Tuya ที่รองรับ Smart Lock Cloud API เช่น:
 
-- Real `lock_motor_state` from Tuya is used when present.
-- If no real locked/unlocked DP is exposed, the state follows the latest successful Home Assistant lock/unlock command.
-- If your physical lock is configured to relock after a delay but Tuya does not expose `auto_lock_time`, set **Physical lock relock delay** in the integration options to `5`, `10`, `15`, or `Off`.
+- `mk`
+- `ms`
+- `jtmsbh`
+- `jtmspro`
+- `gyms`
+- `hotelms`
+- `videolock`
+- `photolock`
 
-### Video and media investigation
+ถ้าอุปกรณ์ของคุณไม่เจอในขั้นตอนตั้งค่า หรือกดปลดล็อกไม่ได้ ให้ตรวจสอบว่าอุปกรณ์นั้นอยู่ในบัญชี Tuya / Smart Life ที่ผูกกับ Tuya IoT Project แล้ว และเปิด Remote Unlock ในแอปแล้ว
 
-The integration exposes `image.<lock_name>_latest_image` for `jtmspro` devices. When a doorbell/video request includes still-image evidence, the image entity asks Tuya for the latest still media URL and displays it if Tuya returns a directly usable image URL.
+## ข้อจำกัด
 
-If the image entity has no picture, check its attributes:
+- ต้องใช้อินเทอร์เน็ต เพราะคำสั่งล็อก/ปลดล็อกส่งผ่าน Tuya Cloud
+- ถ้า Tuya IoT API service หมดอายุ ต้องต่ออายุใน [iot.tuya.com](https://iot.tuya.com)
+- สำหรับ `jtmspro` ปุ่มปลดล็อกจะกดได้เฉพาะตอนอุปกรณ์ออนไลน์และมี `Call Active`
+- `lock.<ชื่ออุปกรณ์>` ของ `jtmspro` เป็นปุ่มสั่งปลดล็อก ไม่ใช่สถานะล็อกจริง
+- สถานะจริงของ `jtmspro` ให้ดูที่ `lock.<ชื่ออุปกรณ์>_physical_status`
+- รูปหรือสื่อจากวิดีโอล็อกขึ้นกับสิทธิ์ API และข้อมูลที่ Tuya ส่งให้บัญชีของคุณ
 
-- `latest_resource_path`
-- `latest_media_error`
-- `latest_media_result_keys`
-- `image_url_available`
+## แก้ปัญหาเบื้องต้น
 
-Relevant Tuya APIs:
-
-- `POST /v1.0/devices/{device_id}/stream/actions/allocate`
-- `GET /v1.0/devices/{device_id}/webrtc-configs`
-- `GET /v1.0/devices/{device_id}/door-lock/latest/media/url?file_type=1`
-- `GET /v1.0/smart-lock/devices/{device_id}/albums-media`
-
-Tuya media may be encrypted and may require additional Tuya API service subscriptions. These video services are for stream/media access and are not required for doorbell request event detection when Device Status Notification is enabled.
-
-## Supported devices
-
-**Tested:**
-- Tuya Access Control (category `mk`, model WIFI_A)
-
-**Should work with any Tuya lock/access control device that supports the Smart Lock Cloud API, including categories:**
-- `mk` — Access control
-- `ms` — Smart lock
-- `jtmsbh` — Smart lock (legacy)
-- `jtmspro` — Smart lock pro
-- `gyms` — Gym locker
-- `hotelms` — Hotel lock
-- `videolock` — Video lock
-- `photolock` — Photo lock
-
-If your lock device uses the Tuya ticket-based unlock flow, it should work. If it doesn't, please [open an issue](https://github.com/batty211/smartlock-tuya/issues) with your device model and category.
-
-## Limitations
-
-- **Cloud-only**: Tuya locks do not support local control. Commands go through the Tuya Cloud API. If your internet is down, you can still use the physical keypad/badge/fingerprint on the device itself.
-- **API trial renewal**: IoT Core and Smart Lock Open Service are free but require renewal approximately every 6 months on iot.tuya.com.
-- **Push-based request detection**: `jtmspro` request state uses Tuya Device Status Notification. Report logs are only a slow fallback/debug path.
-- **Video call detection**: `jtmspro` call detection is based on Tuya datapoints, not a dedicated doorbell session API.
-- **Still image access depends on Tuya media permissions**: Some devices/accounts may return encrypted media, no URL, or require extra video/media service subscriptions.
-
-## Troubleshooting
-
-| Problem | Fix |
-|---------|-----|
-| `uri path invalid` on lock/unlock | Your IoT Core or Smart Lock Open Service subscription has expired. Renew it on [iot.tuya.com](https://iot.tuya.com). |
-| `permission deny` | Your Smart Life / Tuya app account is not linked to the IoT project. See Prerequisites step 2. |
-| No devices found during setup | Make sure your app account is linked and your device is a supported lock category. |
-| Unlock command succeeds but door doesn't open | Enable Remote Unlock in the Tuya / Smart Life app settings for your device. |
-| `jtmspro` unlock is refused | Make sure the lock is online and that a recent doorbell/video request is active. Check the Call Active sensor attributes for `diagnostic_status`, `report_log_error`, and raw datapoint values. |
-| No video stream or media URL | Confirm your Tuya project has the required video/media API services enabled and test the endpoint in Tuya API Explorer. |
-| `invalid_auth` during setup | Double-check your Access ID and Access Secret. Make sure you're using the credentials from the correct project. |
+| อาการ | วิธีตรวจสอบหรือแก้ไข |
+|-------|------------------------|
+| เพิ่ม Integration แล้วไม่เจออุปกรณ์ | ตรวจสอบว่าผูกบัญชี Tuya / Smart Life กับ Tuya IoT Project แล้ว และเลือก Region ถูกต้อง |
+| ขึ้น `invalid_auth` | ตรวจ Access ID, Access Secret และ Region อีกครั้ง |
+| กดปลดล็อกแล้วไม่ทำงาน | เปิด Remote Unlock ในแอป Tuya / Smart Life |
+| ขึ้น error แนว permission หรือ path invalid | ตรวจว่าเปิด **IoT Core** และ **Smart Lock Open Service** แล้ว และบริการยังไม่หมดอายุ |
+| `jtmspro` กด Unlock ไม่ได้ | ตรวจว่าอุปกรณ์ออนไลน์ และมี `Call Active` หลังจากกดกริ่งหรือเริ่มวิดีโอคอล |
+| ปุ่มหลักของ `jtmspro` ถูก disabled | เป็นพฤติกรรมปกติเมื่อยังไม่มี `Call Active` หรืออุปกรณ์ offline |
+| ปุ่มหลักของ `jtmspro` แสดง Unlock ตลอด | เป็นพฤติกรรมที่ตั้งใจไว้ เพราะปุ่มนี้คือปุ่มสั่งปลดล็อกเท่านั้น |
+| สถานะประตูจริงไม่ตรง | ปรับที่ `lock.<ชื่ออุปกรณ์>_physical_status` |
+| ไม่มีรูปจากวิดีโอล็อก | ตรวจสิทธิ์ video/media API ใน Tuya IoT และดูว่าอุปกรณ์ส่งรูปให้บัญชีนี้หรือไม่ |
 
 ## Credits
 

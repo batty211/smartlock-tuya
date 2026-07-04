@@ -38,6 +38,24 @@ env PYTHONPYCACHEPREFIX=/tmp/smart-conlock-tuya-pycache python3 -m compileall -f
 git diff --check
 ```
 
+## Working Notes For Future Codex
+
+User-facing docs:
+
+- README is for users, not for implementation notes.
+- Keep README in Thai unless the user explicitly asks otherwise.
+- Explain Home Assistant behavior in terms users see: entity names, when buttons are enabled, what to press, and what each entity means.
+- Do not dump internal API endpoints, MQTT parsing details, fallback internals, raw diagnostics, or developer investigation notes into README.
+- Put implementation/debug/session details in this file instead.
+
+Important user expectations:
+
+- The user is direct and cares more about correct behavior than polite wrapping; do not make them repeat established preferences.
+- For `jtmspro`, the main lock entity is a remote unlock control only and must keep showing `Unlock`, even when disabled.
+- For `jtmspro`, `Physical Status` is the user-facing physical state entity and should become `unlocked` after a successful remote unlock.
+- Do not treat event/counter datapoints like fingerprint/password/card/app unlocks as proof of current physical locked/unlocked state.
+- Do not push, commit, amend, or force-push unless the user explicitly asks.
+
 No push should be made unless the user explicitly asks.
 
 ## Implemented So Far
