@@ -140,6 +140,18 @@ class TuyaSmartLockCallActiveSensor(TuyaSmartLockBinarySensor):
             "fallback_burst_remaining": self._request_state.get(
                 "fallback_burst_remaining"
             ),
+            "request_fast_fallback_active": self._request_state.get(
+                "request_fast_fallback_active"
+            ),
+            "request_fast_fallback_reason": self._request_state.get(
+                "request_fast_fallback_reason"
+            ),
+            "request_fast_fallback_interval": self._request_state.get(
+                "request_fast_fallback_interval"
+            ),
+            "request_last_refresh_time": self._request_state.get(
+                "request_last_refresh_time"
+            ),
             "request_window_seconds": self._request_state.get(
                 "request_window_seconds"
             ),

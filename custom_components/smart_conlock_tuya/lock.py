@@ -9,6 +9,8 @@ from homeassistant.components.lock import LockEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import CALLBACK_TYPE, HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.restore_state import RestoreEntity
+from homeassistant.util import slugify
 
 from .const import (
     CONF_DEVICE_CATEGORY,
@@ -22,6 +24,8 @@ from .runtime import SmartConlockRuntime
 _LOGGER = logging.getLogger(__name__)
 
 LOCK_OPERATION_EVENT = "smart_conlock_tuya_lock_operation"
+REMOTE_UNLOCK_CONTROL_ROLE = "remote_unlock_control"
+PHYSICAL_STATUS_ROLE = "manual_physical_status"
 
 
 async def async_setup_entry(
@@ -49,18 +53,24 @@ async def async_setup_entry(
         else None
     )
 
+    entities: list[LockEntity] = [
+        TuyaSmartLock(
+            api,
+            runtime,
+            device_id,
+            device_name,
+            device_category,
+            relock_delay,
+            relock_delay_source,
+        )
+    ]
+    if device_category == "jtmspro":
+        entities.append(
+            TuyaSmartLockPhysicalStatus(runtime, device_id, device_name)
+        )
+
     async_add_entities(
-        [
-            TuyaSmartLock(
-                api,
-                runtime,
-                device_id,
-                device_name,
-                device_category,
-                relock_delay,
-                relock_delay_source,
-            )
-        ],
+        entities,
         True,
     )
 
@@ -94,6 +104,7 @@ class TuyaSmartLock(LockEntity):
         self._attr_available = device_category != "jtmspro"
         self._attr_should_poll = device_category != "jtmspro"
         self._device_name = device_name
+        self._command_state_source = "init"
         self._request_state = {}
         self._lock_state = {}
         self._unsub_runtime: CALLBACK_TYPE | None = None
@@ -115,8 +126,14 @@ class TuyaSmartLock(LockEntity):
 
         self._sync_from_runtime()
         return {
+            "entity_role": REMOTE_UNLOCK_CONTROL_ROLE,
+            "physical_status_entity": (
+                f"lock.{slugify(self._device_name)}_physical_status"
+            ),
             "unlock_available": self._unlock_available(),
-            "lock_available": self._lock_available(),
+            "lock_available": False,
+            "tuya_lock_api_supported": False,
+            "command_state_source": self._command_state_source,
             "call_active": self._request_state.get("active"),
             "call_active_diagnostic_status": self._request_state.get(
                 "diagnostic_status"
@@ -173,6 +190,11 @@ class TuyaSmartLock(LockEntity):
 
     async def async_lock(self, **kwargs) -> None:
         """Lock the door."""
+        if self._device_category == "jtmspro":
+            self._reset_remote_unlock_control("manual_reset")
+            self.async_write_ha_state()
+            return
+
         self._attr_is_locking = True
         self.async_write_ha_state()
 
@@ -196,10 +218,13 @@ class TuyaSmartLock(LockEntity):
 
         self._attr_is_unlocking = False
         if success:
-            self._record_successful_operation("unlocked", False)
+            if self._device_category == "jtmspro":
+                self._record_remote_unlock_success()
+            else:
+                self._record_successful_operation("unlocked", False)
         self.async_write_ha_state()
 
-        if success and self._relock_delay:
+        if success and self._relock_delay and self._device_category != "jtmspro":
             delay = self._relock_delay + 1
             self.hass.loop.call_later(delay, self._set_locked)
 
@@ -230,15 +255,7 @@ class TuyaSmartLock(LockEntity):
         if self._device_category != "jtmspro":
             return True
 
-        online, _call_active = self._sync_from_runtime()
-        if online is not True:
-            _LOGGER.warning(
-                "Refusing to lock %s because jtmspro device is not online",
-                self._device_id,
-            )
-            return False
-
-        return True
+        return False
 
     def _sync_from_runtime(self) -> tuple[bool | None, bool | None]:
         """Sync lock availability from the shared runtime."""
@@ -259,12 +276,12 @@ class TuyaSmartLock(LockEntity):
         self._lock_state = self._runtime.state.lock_state()
         online = self._runtime.state.online
         call_active = self._request_state["active"]
-        locked = self._lock_state.get("locked")
-        if locked is not None:
-            self._attr_is_locked = locked
+
+        if call_active is not True:
+            self._reset_remote_unlock_control("call_inactive")
         else:
-            self._attr_is_locked = None
-        self._attr_available = online is True
+            self._attr_is_locked = self._command_state_source != "unlock_success"
+        self._attr_available = online is True and call_active is True
         return online, call_active
 
     def _unlock_available(self) -> bool:
@@ -276,7 +293,42 @@ class TuyaSmartLock(LockEntity):
 
     def _lock_available(self) -> bool:
         """Return whether the lock command should be accepted."""
+        if self._device_category == "jtmspro":
+            return False
         return self._runtime is not None and self._runtime.state.online is True
+
+    def _reset_remote_unlock_control(self, source: str) -> None:
+        """Reset jtmspro control state so Home Assistant offers Unlock next."""
+        self._attr_is_locked = True
+        self._attr_is_locking = False
+        self._attr_is_unlocking = False
+        self._command_state_source = source
+
+    def _record_remote_unlock_success(self) -> None:
+        """Record a successful jtmspro unlock command without claiming physical state."""
+        self._attr_is_locked = False
+        self._command_state_source = "unlock_success"
+        event_time = int(time.time() * 1000)
+        self._lock_state = {
+            **self._lock_state,
+            "last_lock_operation": {
+                "action": "unlocked",
+                "source": "remote_unlock_control",
+                "event_time": event_time,
+                "value": None,
+            },
+        }
+        self.hass.bus.async_fire(
+            LOCK_OPERATION_EVENT,
+            {
+                "entity_id": self.entity_id,
+                "device_id": self._device_id,
+                "device_name": self._device_name,
+                "action": "unlocked",
+                "source": "remote_unlock_control",
+                "event_time": event_time,
+            },
+        )
 
     def _record_successful_operation(
         self,
@@ -336,3 +388,106 @@ def _configured_relock_delay(entry: ConfigEntry) -> int | None:
     except ValueError:
         return None
     return delay if delay in {5, 10, 15} else None
+
+
+class TuyaSmartLockPhysicalStatus(LockEntity, RestoreEntity):
+    """Manual physical lock status for a jtmspro lock."""
+
+    _attr_has_entity_name = True
+    _attr_name = "Physical Status"
+    _attr_should_poll = False
+
+    def __init__(
+        self,
+        runtime: SmartConlockRuntime | None,
+        device_id: str,
+        device_name: str,
+    ) -> None:
+        self._runtime = runtime
+        self._device_id = device_id
+        self._device_name = device_name
+        self._attr_unique_id = f"smart_conlock_tuya_{device_id}_physical_status"
+        self._attr_is_locked = None
+        self._state_source = "unknown"
+        self._last_manual_update: int | None = None
+        self._lock_state: dict = {}
+        self._unsub_runtime: CALLBACK_TYPE | None = None
+
+    @property
+    def device_info(self):
+        """Link to the existing Tuya device."""
+        return {
+            "identifiers": {("tuya", self._device_id)},
+            "name": self._device_name,
+            "manufacturer": "Tuya",
+        }
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        """Return physical status diagnostics."""
+        return {
+            "entity_role": PHYSICAL_STATUS_ROLE,
+            "state_source": self._state_source,
+            "last_manual_update": self._last_manual_update,
+            "lock_motor_state": self._lock_state.get("lock_motor_state"),
+            "state_confidence": self._lock_state.get("state_confidence"),
+        }
+
+    async def async_added_to_hass(self) -> None:
+        """Restore manual state and subscribe to runtime updates."""
+        last_state = await self.async_get_last_state()
+        if last_state is not None:
+            if last_state.state == "locked":
+                self._attr_is_locked = True
+                self._state_source = "restored"
+            elif last_state.state == "unlocked":
+                self._attr_is_locked = False
+                self._state_source = "restored"
+
+        if self._runtime is not None:
+            self._unsub_runtime = self._runtime.async_add_listener(
+                self._handle_runtime_update
+            )
+            self._sync_from_runtime()
+
+    async def async_will_remove_from_hass(self) -> None:
+        """Unsubscribe from runtime updates."""
+        if self._unsub_runtime:
+            self._unsub_runtime()
+            self._unsub_runtime = None
+
+    def _handle_runtime_update(self) -> None:
+        """Handle runtime state updates."""
+        self._sync_from_runtime()
+        self.async_write_ha_state()
+
+    def _sync_from_runtime(self) -> None:
+        """Use Tuya physical DP only when one actually exists."""
+        if self._runtime is None:
+            return
+
+        self._lock_state = self._runtime.state.lock_state()
+        if self._lock_state.get("state_confidence") != "physical_dp":
+            return
+
+        locked = self._lock_state.get("locked")
+        if locked is not None:
+            self._attr_is_locked = locked
+            self._state_source = (
+                self._lock_state.get("state_source") or "tuya_lock_motor_state"
+            )
+
+    async def async_lock(self, **kwargs) -> None:
+        """Manually mark the physical lock as locked."""
+        self._set_manual_state(True)
+
+    async def async_unlock(self, **kwargs) -> None:
+        """Manually mark the physical lock as unlocked."""
+        self._set_manual_state(False)
+
+    def _set_manual_state(self, locked: bool) -> None:
+        """Set the manual physical status."""
+        self._attr_is_locked = locked
+        self._state_source = "manual"
+        self._last_manual_update = int(time.time() * 1000)
+        self.async_write_ha_state()

@@ -387,3 +387,80 @@ The user wants to continue with these features next:
      - `GET /v1.0/devices/{device_id}/door-lock/latest/media/url?file_type=1`
      - `GET /v1.0/smart-lock/devices/{device_id}/albums-media`
    - Need to determine whether Tuya returns a directly usable signed image URL, encrypted media, or requires additional video/cloud-storage service permissions.
+
+## 2026-07-04 Latest Correction: Unlock Control vs Physical Status
+
+Important correction from the user:
+
+- The `jtmspro` Tuya API can unlock the device, but it cannot lock the device.
+- The device/product does not expose a reliable current physical locked/unlocked state in the known Standard Status Set.
+- The existing Home Assistant lock toggle must not be treated as physical truth.
+
+Implemented:
+
+- The existing `lock.<device>` entity keeps the existing unique ID:
+  - `smart_conlock_tuya_{device_id}`
+- For `jtmspro`, this entity is now a **Remote Unlock Control**:
+  - it exists to send the Tuya unlock command only;
+  - it does not represent physical lock status;
+  - it does not call the Tuya lock API from `async_lock()`;
+  - `async_lock()` only resets the control state locally to ready/locked;
+  - when `Call Active` is off, it resets to `locked` so Home Assistant shows the next possible action as Unlock;
+  - when `Call Active` is off or the device is offline, it is unavailable/disabled so users cannot press it randomly;
+  - when the device is online and `Call Active` is on, it becomes available and `async_unlock()` can call the Tuya unlock API.
+- The remote unlock control exposes diagnostic attributes:
+  - `entity_role: remote_unlock_control`
+  - `physical_status_entity`
+  - `unlock_available`
+  - `lock_available: false`
+  - `tuya_lock_api_supported: false`
+  - `command_state_source`
+  - `call_active`
+
+Added a separate manual physical status entity:
+
+- Entity: `lock.<device>_physical_status`
+- Unique ID:
+  - `smart_conlock_tuya_{device_id}_physical_status`
+- Purpose:
+  - user-maintained physical locked/unlocked status;
+  - can be changed manually in Home Assistant;
+  - can be changed by automations from other sensors;
+  - restores state after Home Assistant restart;
+  - is not changed automatically by remote unlock commands.
+- If Tuya ever exposes a real physical state DP such as `lock_motor_state`, runtime can update this physical status entity only when `state_confidence` is `physical_dp`.
+
+Important behavior to preserve:
+
+- Do not make the existing `jtmspro` lock entity available when there is no active call.
+- Do not call `TuyaCloudApi.async_lock()` for `jtmspro`.
+- Do not use `unlock_fingerprint`, `unlock_password`, `unlock_card`, `unlock_face`, `unlock_app`, or `unlock_hand` as proof of current physical lock status. They are event/counter style datapoints.
+
+## 2026-07-04 Latest Correction: Request-Only Fast Fallback
+
+Problem:
+
+- Tuya Device Status Notification can connect and subscribe, but real device events still have `push_message_count: 0`.
+- The image/media evidence can arrive in report logs before `Call Active` updates, so waiting for the 60-second full fallback is too slow.
+
+Implemented:
+
+- Full fallback remains every 60 seconds for broader device/online/status diagnostics.
+- Added request-only fast fallback:
+  - interval: 5 seconds;
+  - refreshes only the request/call report-log state;
+  - does not fetch full device status each time;
+  - runs when push is unavailable, not ready, or connected/subscribed but silent;
+  - stops automatically once push messages start arriving.
+- `binary_sensor.<lock_name>_call_active` now exposes:
+  - `request_fast_fallback_active`
+  - `request_fast_fallback_reason`
+  - `request_fast_fallback_interval`
+  - `request_last_refresh_time`
+
+Latest validation passed:
+
+```bash
+env PYTHONPYCACHEPREFIX=/tmp/smart-conlock-tuya-pycache python3 -m compileall -f custom_components/smart_conlock_tuya
+git diff --check
+```

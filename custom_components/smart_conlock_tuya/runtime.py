@@ -21,6 +21,7 @@ from .tuya_api import JTMSPRO_REQUEST_WINDOW, TuyaCloudApi
 _LOGGER = logging.getLogger(__name__)
 
 FALLBACK_INTERVAL = timedelta(seconds=60)
+REQUEST_FAST_FALLBACK_INTERVAL = 5
 FALLBACK_BURST_INTERVAL = 5
 FALLBACK_BURST_MAX_REFRESHES = 18
 REQUEST_EVENT_CODES = {
@@ -248,6 +249,10 @@ class SmartConlockRuntimeState:
     fallback_last_refresh_time: int | None = None
     fallback_burst_active: bool = False
     fallback_burst_remaining: int = 0
+    request_fast_fallback_active: bool = False
+    request_fast_fallback_reason: str | None = None
+    request_fast_fallback_interval: int = REQUEST_FAST_FALLBACK_INTERVAL
+    request_last_refresh_time: int | None = None
     request_window_seconds: int = JTMSPRO_REQUEST_WINDOW
     source: str | None = None
     last_event_time: int | None = None
@@ -298,6 +303,10 @@ class SmartConlockRuntimeState:
             "fallback_last_refresh_time": self.fallback_last_refresh_time,
             "fallback_burst_active": self.fallback_burst_active,
             "fallback_burst_remaining": self.fallback_burst_remaining,
+            "request_fast_fallback_active": self.request_fast_fallback_active,
+            "request_fast_fallback_reason": self.request_fast_fallback_reason,
+            "request_fast_fallback_interval": self.request_fast_fallback_interval,
+            "request_last_refresh_time": self.request_last_refresh_time,
             "request_window_seconds": self.request_window_seconds,
             "source": self.source,
             "last_event_time": self.last_event_time,
@@ -357,6 +366,7 @@ class SmartConlockRuntime:
         self._unsub_expiry: CALLBACK_TYPE | None = None
         self._unsub_mq_refresh: CALLBACK_TYPE | None = None
         self._unsub_fallback_burst: CALLBACK_TYPE | None = None
+        self._unsub_request_fast_fallback: CALLBACK_TYPE | None = None
         self._mq: DeviceStatusNotificationClient | None = None
 
     async def async_start(self) -> None:
@@ -368,6 +378,7 @@ class SmartConlockRuntime:
             self._async_refresh_fallback_callback,
             FALLBACK_INTERVAL,
         )
+        self._schedule_request_fast_fallback()
 
     async def async_stop(self) -> None:
         """Stop runtime services."""
@@ -383,6 +394,9 @@ class SmartConlockRuntime:
         if self._unsub_fallback_burst:
             self._unsub_fallback_burst()
             self._unsub_fallback_burst = None
+        if self._unsub_request_fast_fallback:
+            self._unsub_request_fast_fallback()
+            self._unsub_request_fast_fallback = None
         await self._async_stop_mq()
         self._listeners.clear()
 
@@ -443,6 +457,27 @@ class SmartConlockRuntime:
 
     async def _async_refresh_fallback_callback(self, now: Any) -> None:
         await self.async_refresh_fallback(now)
+
+    async def async_refresh_request_fallback(self) -> None:
+        """Refresh only request/call state from report logs."""
+        changed = False
+        refresh_time = int(time.time() * 1000)
+        if self.state.request_last_refresh_time != refresh_time:
+            self.state.request_last_refresh_time = refresh_time
+            changed = True
+
+        try:
+            request_state = await self.api.async_get_jtmspro_request_state(
+                self.device_id
+            )
+            changed = self._merge_fallback_request_state(request_state) or changed
+        except Exception as err:  # noqa: BLE001
+            self.state.last_error = f"request_fast_refresh_failed: {err}"
+            self.state.diagnostic_status = "request_fast_fallback_error"
+            changed = True
+
+        if changed:
+            self.async_notify_listeners()
 
     def _merge_fallback_request_state(self, request_state: dict[str, Any]) -> bool:
         """Merge slow report-log fallback state into runtime state."""
@@ -628,6 +663,7 @@ class SmartConlockRuntime:
             self.state.push_message_count += 1
             self.state.push_last_message_time = int(time.time() * 1000)
             self.state.push_last_wrapper_keys = diagnostic.get("wrapper_keys")
+            self._stop_request_fast_fallback()
         elif event == "decoded":
             self.state.push_last_decoded_payload_type = diagnostic.get(
                 "decoded_payload_type"
@@ -640,6 +676,64 @@ class SmartConlockRuntime:
             self.state.push_last_decode_error = diagnostic.get("decode_error")
 
         self.async_notify_listeners()
+
+    @callback
+    def _schedule_request_fast_fallback(self) -> None:
+        """Schedule a fast request-only fallback when push is not delivering."""
+        if self._unsub_request_fast_fallback:
+            return
+        self._unsub_request_fast_fallback = async_call_later(
+            self.hass,
+            REQUEST_FAST_FALLBACK_INTERVAL,
+            self._run_request_fast_fallback,
+        )
+
+    @callback
+    def _run_request_fast_fallback(self, _now: Any = None) -> None:
+        """Run request-only fallback while Tuya push is silent."""
+        self._unsub_request_fast_fallback = None
+        reason = self._request_fast_fallback_reason()
+        if reason is None:
+            self._stop_request_fast_fallback()
+            return
+
+        self.state.request_fast_fallback_active = True
+        self.state.request_fast_fallback_reason = reason
+        self.state.request_fast_fallback_interval = REQUEST_FAST_FALLBACK_INTERVAL
+        self.hass.async_create_task(self.async_refresh_request_fallback())
+        self._unsub_request_fast_fallback = async_call_later(
+            self.hass,
+            REQUEST_FAST_FALLBACK_INTERVAL,
+            self._run_request_fast_fallback,
+        )
+        self.async_notify_listeners()
+
+    @callback
+    def _stop_request_fast_fallback(self) -> None:
+        """Stop request-only fallback diagnostics and timer."""
+        if self._unsub_request_fast_fallback:
+            self._unsub_request_fast_fallback()
+            self._unsub_request_fast_fallback = None
+        if self.state.request_fast_fallback_active:
+            self.state.request_fast_fallback_active = False
+            self.state.request_fast_fallback_reason = None
+            self.async_notify_listeners()
+
+    def _request_fast_fallback_reason(self) -> str | None:
+        """Return why request-only fallback should run, if needed."""
+        if self.state.push_message_count > 0:
+            return None
+        if self.state.online is False:
+            return None
+        if self.state.push_connect_result == 0 and (
+            self.state.push_subscribed_topic_count or 0
+        ) > 0:
+            return "push_silent"
+        if self.state.diagnostic_status == "push_unavailable":
+            return "push_unavailable"
+        if self.state.push_connect_result is None:
+            return "push_not_ready"
+        return None
 
     @callback
     def _activate_request(
