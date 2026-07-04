@@ -8,6 +8,7 @@ CONF_DEVICE_ID = "device_id"
 CONF_DEVICE_NAME = "device_name"
 CONF_DEVICE_CATEGORY = "device_category"
 CONF_API_REGION = "api_region"
+CONF_DEVICE_RELOCK_DELAY = "device_relock_delay"
 
 API_REGIONS = {
     "eu": "openapi.tuyaeu.com",

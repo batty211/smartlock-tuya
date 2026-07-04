@@ -22,10 +22,13 @@ Smart (Con)lock tuya uses the Cloud API ticket-based flow to send lock/unlock co
 | Battery | `sensor` | Shows the raw Tuya battery enum (`high`, `medium`, `low`, `poweroff`) and an estimated percentage attribute |
 | Online | `binary_sensor` | Shows whether a `jtmspro` device is online |
 | Call Active | `binary_sensor` | Shows whether a recent `jtmspro` doorbell/video request opened the unlock window |
+| Latest Image | `image` | Shows the latest still image for `jtmspro` video locks when Tuya returns a usable media URL |
 
 The lock entity is linked to your existing Tuya device in Home Assistant. It appears alongside the `binary_sensor` from the official Tuya integration, all grouped under the same device.
 
 For `jtmspro` devices, unlock is blocked unless the device is online and an active video call/session is detected. This is intentionally conservative for video locks.
+
+Lock state is also conservative. If Tuya exposes a real `lock_motor_state` status for your device, the integration uses it. If not, Home Assistant shows the latest state the integration can actually know from its own lock/unlock commands. If your physical lock has a relock delay but Tuya does not expose it through the API, configure the same delay in the integration options.
 
 ## Prerequisites
 
@@ -132,6 +135,7 @@ For category `jtmspro`, the integration adds:
 
 - `binary_sensor.<lock_name>_online`
 - `binary_sensor.<lock_name>_call_active`
+- `image.<lock_name>_latest_image`
 
 The online sensor uses Tuya Device Status Notification when available, with slow REST refresh from `GET /v1.0/devices/{device_id}` as fallback.
 
@@ -145,9 +149,22 @@ Unlock protection for `jtmspro`:
 - If no recent doorbell/video request is detected, unlock is refused and the lock entity becomes unavailable so the Home Assistant unlock button cannot be pressed.
 - Other lock categories keep the original unlock behavior.
 
+Lock state for `jtmspro`:
+
+- Real `lock_motor_state` from Tuya is used when present.
+- If no real locked/unlocked DP is exposed, the state follows the latest successful Home Assistant lock/unlock command.
+- If your physical lock is configured to relock after a delay but Tuya does not expose `auto_lock_time`, set **Physical lock relock delay** in the integration options to `5`, `10`, `15`, or `Off`.
+
 ### Video and media investigation
 
-The API client includes helper methods for Tuya video/media endpoints, but this integration does not expose a Home Assistant camera entity yet.
+The integration exposes `image.<lock_name>_latest_image` for `jtmspro` devices. When a doorbell/video request includes still-image evidence, the image entity asks Tuya for the latest still media URL and displays it if Tuya returns a directly usable image URL.
+
+If the image entity has no picture, check its attributes:
+
+- `latest_resource_path`
+- `latest_media_error`
+- `latest_media_result_keys`
+- `image_url_available`
 
 Relevant Tuya APIs:
 
@@ -181,7 +198,7 @@ If your lock device uses the Tuya ticket-based unlock flow, it should work. If i
 - **API trial renewal**: IoT Core and Smart Lock Open Service are free but require renewal approximately every 6 months on iot.tuya.com.
 - **Push-based request detection**: `jtmspro` request state uses Tuya Device Status Notification. Report logs are only a slow fallback/debug path.
 - **Video call detection**: `jtmspro` call detection is based on Tuya datapoints, not a dedicated doorbell session API.
-- **Camera entity not included**: Stream, WebRTC, latest media, and album APIs are available as investigation helpers only.
+- **Still image access depends on Tuya media permissions**: Some devices/accounts may return encrypted media, no URL, or require extra video/media service subscriptions.
 
 ## Troubleshooting
 

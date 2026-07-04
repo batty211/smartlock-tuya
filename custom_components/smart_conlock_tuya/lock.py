@@ -10,12 +10,17 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import CALLBACK_TYPE, HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import CONF_DEVICE_CATEGORY, CONF_DEVICE_ID, CONF_DEVICE_NAME, DOMAIN
+from .const import (
+    CONF_DEVICE_CATEGORY,
+    CONF_DEVICE_ID,
+    CONF_DEVICE_NAME,
+    CONF_DEVICE_RELOCK_DELAY,
+    DOMAIN,
+)
 from .runtime import SmartConlockRuntime
 
 _LOGGER = logging.getLogger(__name__)
 
-DEFAULT_AUTO_LOCK_DELAY = 3
 LOCK_OPERATION_EVENT = "smart_conlock_tuya_lock_operation"
 
 
@@ -33,10 +38,16 @@ async def async_setup_entry(
     device_name = entry_data[CONF_DEVICE_NAME]
     device_category = entry_data.get(CONF_DEVICE_CATEGORY)
 
-    # Read auto_lock_time from device
-    auto_lock_time = await api.async_get_auto_lock_time(device_id)
-    if auto_lock_time is None:
-        auto_lock_time = DEFAULT_AUTO_LOCK_DELAY
+    device_auto_lock_time = await api.async_get_auto_lock_time(device_id)
+    configured_relock_delay = _configured_relock_delay(entry)
+    relock_delay = device_auto_lock_time or configured_relock_delay
+    relock_delay_source = (
+        "tuya_auto_lock_time"
+        if device_auto_lock_time is not None
+        else "configured_device_relock_delay"
+        if configured_relock_delay is not None
+        else None
+    )
 
     async_add_entities(
         [
@@ -46,7 +57,8 @@ async def async_setup_entry(
                 device_id,
                 device_name,
                 device_category,
-                auto_lock_time,
+                relock_delay,
+                relock_delay_source,
             )
         ],
         True,
@@ -66,15 +78,17 @@ class TuyaSmartLock(LockEntity):
         device_id: str,
         device_name: str,
         device_category: str | None,
-        auto_lock_time: int,
+        relock_delay: int | None,
+        relock_delay_source: str | None,
     ) -> None:
         self._api = api
         self._runtime = runtime
         self._device_id = device_id
         self._device_category = device_category
-        self._auto_lock_time = auto_lock_time
+        self._relock_delay = relock_delay
+        self._relock_delay_source = relock_delay_source
         self._attr_unique_id = f"smart_conlock_tuya_{device_id}"
-        self._attr_is_locked = True
+        self._attr_is_locked = None
         self._attr_is_locking = False
         self._attr_is_unlocking = False
         self._attr_available = device_category != "jtmspro"
@@ -117,6 +131,8 @@ class TuyaSmartLock(LockEntity):
             "lock_report_log_error": self._lock_state.get("lock_report_log_error"),
             "lock_report_log_count": self._lock_state.get("lock_report_log_count"),
             "last_lock_operation": self._lock_state.get("last_lock_operation"),
+            "relock_delay": self._relock_delay,
+            "relock_delay_source": self._relock_delay_source,
         }
 
     async def async_update(self) -> None:
@@ -178,9 +194,8 @@ class TuyaSmartLock(LockEntity):
             self._record_successful_operation("unlocked", False)
         self.async_write_ha_state()
 
-        if success:
-            # Re-lock after auto_lock_time + 1s buffer
-            delay = self._auto_lock_time + 1
+        if success and self._relock_delay:
+            delay = self._relock_delay + 1
             self.hass.loop.call_later(delay, self._set_locked)
 
     async def _async_can_unlock(self) -> bool:
@@ -264,6 +279,18 @@ class TuyaSmartLock(LockEntity):
         self._record_successful_operation(
             "locked",
             True,
-            source="auto_lock_timer_estimate",
+            source=self._relock_delay_source or "configured_device_relock_delay",
         )
         self.async_write_ha_state()
+
+
+def _configured_relock_delay(entry: ConfigEntry) -> int | None:
+    """Return the user-configured physical relock delay."""
+    value = str(entry.options.get(CONF_DEVICE_RELOCK_DELAY, "off")).lower()
+    if value == "off":
+        return None
+    try:
+        delay = int(value)
+    except ValueError:
+        return None
+    return delay if delay in {5, 10, 15} else None

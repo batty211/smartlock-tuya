@@ -43,7 +43,6 @@ JTMSPRO_REQUEST_CODES = [
 ]
 JTMSPRO_REQUEST_WINDOW = 90
 LOCK_MOTOR_STATE_CODE = "lock_motor_state"
-LOCK_STATE_LOOKBACK_SECONDS = 24 * 60 * 60
 
 
 class TuyaCloudApi:
@@ -598,43 +597,18 @@ class TuyaCloudApi:
     async def async_get_lock_activity_state(
         self,
         device_id: str,
-        lookback_seconds: int = LOCK_STATE_LOOKBACK_SECONDS,
     ) -> dict[str, Any]:
-        """Get current lock state and recent lock_motor_state history."""
-        now_ms = int(time.time() * 1000)
+        """Get current lock state from the latest device status."""
         status = await self.async_get_status_map(device_id)
         raw_state = status.get(LOCK_MOTOR_STATE_CODE)
         locked = self.interpret_lock_motor_state(raw_state)
-        logs = await self.async_get_report_logs(
-            device_id,
-            [LOCK_MOTOR_STATE_CODE],
-            now_ms - (lookback_seconds * 1000),
-            now_ms,
-            size=5,
-        )
-
-        last_operation = None
-        if logs:
-            for log in logs:
-                value = log.get("value")
-                log_locked = self.interpret_lock_motor_state(value)
-                event_time = self._log_event_time_ms(log)
-                if log_locked is None or event_time <= 0:
-                    continue
-                last_operation = {
-                    "action": "locked" if log_locked else "unlocked",
-                    "source": log.get("source") or log.get("operator") or "report_log",
-                    "event_time": event_time,
-                    "value": value,
-                }
-                break
 
         return {
             "locked": locked,
             "lock_motor_state": raw_state,
-            "last_lock_operation": last_operation,
-            "lock_report_log_error": self._last_report_logs_error,
-            "lock_report_log_count": None if logs is None else len(logs),
+            "last_lock_operation": None,
+            "lock_report_log_error": None,
+            "lock_report_log_count": None,
         }
 
     async def async_unlock(self, device_id: str) -> bool:

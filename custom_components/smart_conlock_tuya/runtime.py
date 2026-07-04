@@ -467,7 +467,8 @@ class SmartConlockRuntime:
         """Merge slow status/report-log lock state into runtime state."""
         before = self.state.lock_state()
 
-        self.state.locked = lock_state.get("locked")
+        if lock_state.get("locked") is not None:
+            self.state.locked = lock_state.get("locked")
         self.state.lock_motor_state = lock_state.get("lock_motor_state")
         self.state.lock_report_log_error = lock_state.get("lock_report_log_error")
         self.state.lock_report_log_count = lock_state.get("lock_report_log_count")

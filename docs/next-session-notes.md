@@ -297,8 +297,7 @@ Implemented after reading these notes:
 - Added `lock_motor_state` interpretation through `TuyaCloudApi.interpret_lock_motor_state()`.
 - Added `TuyaCloudApi.async_get_lock_activity_state()`:
   - Reads current `/v1.0/iot-03/devices/{device_id}/status`.
-  - Reads recent `lock_motor_state` report logs over a 24-hour lookback.
-  - Returns raw `lock_motor_state`, parsed Home Assistant `locked` state, report-log diagnostics, and latest operation evidence when present.
+  - Returns raw `lock_motor_state` and parsed Home Assistant `locked` state.
 - Added runtime storage for:
   - `locked`
   - `lock_motor_state`
@@ -311,12 +310,18 @@ Implemented after reading these notes:
   - non-`jtmspro` lock entities can poll `lock_motor_state` through the existing status endpoint.
   - successful Home Assistant lock/unlock commands immediately update the visible state.
   - successful lock/unlock commands fire a Home Assistant event named `smart_conlock_tuya_lock_operation`.
-  - auto-lock timer state is recorded as `auto_lock_timer_estimate`.
 - Added lock attributes for `jtmspro`:
   - `lock_motor_state`
   - `lock_report_log_error`
   - `lock_report_log_count`
   - `last_lock_operation`
+- Important fix: do not request `lock_motor_state` through `/v2.1/cloud/thing/{device_id}/report-logs`; Tuya returns `param is illegal ,please check it`.
+- Important correction: do not default to a 3-second auto-lock timer. The user's physical device can be configured to relock after a delay, but that setting does not appear to be exposed by Tuya's API for this product.
+- Added integration option:
+  - `device_relock_delay`
+- Allowed values are `off`, `5`, `10`, and `15`, matching the physical lock's relock delay choices.
+- Relock state is only scheduled when Tuya exposes `auto_lock_time` or the user configures `device_relock_delay` to match the physical lock.
+- If no real locked/unlocked DP exists, the lock entity keeps the latest state the integration can actually know from successful Home Assistant commands or push events.
 
 Latest validation passed:
 
@@ -329,24 +334,53 @@ Important caveat:
 
 - `/Users/bordin/Devs/Tuya/devices.json` did not include `lock_motor_state`, so real-device values still need to be confirmed in Home Assistant attributes.
 - Current parser assumes Tuya boolean `true`/`1`/`open` means unlocked and `false`/`0`/`closed` means locked, matching the prior local helper comment. If the real device reports opposite values, invert this parser.
+- The user's `jtmspro` mapping includes `unlock_fingerprint`, `unlock_password`, `unlock_temporary`, `unlock_card`, `unlock_face`, `unlock_app`, and `unlock_hand`, but those are unlock event/counter style datapoints, not proof that the device is currently locked.
+
+## Latest Image Work Continued
+
+User pointed out that the image evidence was arriving in `initiative_message_decoded.files`, but the integration was only exposing it as a raw attribute and not displaying it.
+
+Implemented:
+
+- Added `Platform.IMAGE` to the integration platforms.
+- Added `custom_components/smart_conlock_tuya/image.py`.
+- Added `image.<lock_name>_latest_image` for `jtmspro` devices.
+- The image entity:
+  - subscribes to the shared runtime;
+  - extracts the still-image resource path from `initiative_message_decoded.files`;
+  - calls `GET /v1.0/devices/{device_id}/door-lock/latest/media/url?file_type=1`;
+  - recursively extracts a usable `http`/`https` URL from common Tuya response shapes;
+  - proxies image bytes through Home Assistant with `async_image()`;
+  - exposes diagnostics:
+    - `latest_resource_path`
+    - `latest_media_error`
+    - `latest_media_result_keys`
+    - `image_url_available`
+
+Important caveat:
+
+- The decoded `files` array contains Tuya resource paths, not necessarily browser-displayable URLs.
+- The image entity can only display the still image if Tuya's latest-media endpoint returns a direct image URL.
+- If `latest_media_error` is `latest_media_url_not_found` or `latest_media_unavailable`, inspect the Tuya API response/service permissions before adding more code.
 
 ## Next Feature Requests
 
 The user wants to continue with these features next:
 
 1. Add logs/history for lock and unlock operations.
-   - Partially implemented via `last_lock_operation`, `lock_motor_state` report-log lookup, and `smart_conlock_tuya_lock_operation` HA events.
-   - Next step: restart Home Assistant, lock/unlock once, and confirm whether report logs include `lock_motor_state` entries with useful source/operator fields.
+   - Partially implemented via `last_lock_operation` for Home Assistant commands/push events and `smart_conlock_tuya_lock_operation` HA events.
+   - Do not use report logs with `lock_motor_state`; Tuya rejects that code on the report-log endpoint.
    - Goal: show when the lock was locked/unlocked and, if possible, whether the operation came from Home Assistant, device/app, or Tuya report logs.
-   - Likely sources to investigate: Tuya report logs/status codes, existing `lock.py` command result paths, and Home Assistant logbook/event entities.
+   - Likely sources to investigate: existing `lock.py` command result paths, Home Assistant logbook/event entities, and any Tuya report-log operation code that is explicitly accepted by the endpoint.
 
 2. Show the current lock state: locked or unlocked.
-   - Implemented using `lock_motor_state`, but real-device raw values still need confirmation.
+   - Implemented conservatively using `lock_motor_state` only when present.
+   - If `lock_motor_state` is absent, use latest known command/push state and only schedule relock when the user configures the delay that is set on the physical device.
    - Goal: expose a reliable Home Assistant lock state instead of only command capability.
-   - Likely DP/code to verify from current code/device data: `lock_motor_state`.
-   - Need to confirm real values returned by `/v1.0/iot-03/devices/{device_id}/status` for locked vs unlocked.
+   - Need to confirm whether `/v1.0/iot-03/devices/{device_id}/status` ever returns a real locked/unlocked DP for this product.
 
 3. Show a still image from the smart lock camera.
+   - Implemented as `image.<lock_name>_latest_image`, pending real-device validation.
    - Goal: image only, not video.
    - The decoded `initiative_message.files` includes `.jpg` resource paths.
    - Existing API helpers to investigate:
