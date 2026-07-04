@@ -1,6 +1,6 @@
 # Next Session Notes
 
-Date: 2026-07-03
+Date: 2026-07-04
 
 ## Current Goal
 
@@ -25,6 +25,7 @@ Important files:
 - `custom_components/smart_conlock_tuya/manifest.json`
 - `custom_components/smart_conlock_tuya/const.py`
 - `custom_components/smart_conlock_tuya/tuya_api.py`
+- `custom_components/smart_conlock_tuya/runtime.py`
 - `custom_components/smart_conlock_tuya/lock.py`
 - `custom_components/smart_conlock_tuya/binary_sensor.py`
 - `custom_components/smart_conlock_tuya/sensor.py`
@@ -51,16 +52,23 @@ Battery sensor:
 `jtmspro` entities:
 
 - `binary_sensor.<lock_name>_online`
-- `binary_sensor.<lock_name>_video_call_request`
+- `binary_sensor.<lock_name>_call_active`
 - Lock unlock is blocked unless the device is online and a recent request is active.
 
-Request detection currently uses Tuya report logs:
+Request detection now uses a shared runtime/coordinator:
+
+- Primary path: Tuya Device Status Notification MQTT messages.
+- Fallback/debug path: Tuya report logs every 60 seconds.
+- The 3-second entity-level REST polling path has been removed.
+
+Report-log fallback endpoint:
 
 - Endpoint: `GET /v2.1/cloud/thing/{device_id}/report-logs`
 - Codes checked:
   - `doorbell`
   - `initiative_message`
   - `video_request_realtime`
+  - `photo_again`
 - Active window: 90 seconds
 
 `initiative_message` is base64 decoded and treated as active when:
@@ -73,6 +81,63 @@ Request detection currently uses Tuya report logs:
 ```
 
 `video_request_realtime` is exposed as evidence only. Do not treat `AAABAQ==` and `AQABAQ==` as start/end until real-device behavior is confirmed.
+
+`photo_again` is also diagnostic only.
+
+## Latest Implementation Summary
+
+Implemented on 2026-07-04:
+
+- Added `custom_components/smart_conlock_tuya/runtime.py`.
+- Added `DeviceStatusNotificationClient` using:
+  - `POST /v1.0/iot-03/open-hub/access-config`
+  - body fields: `uid`, `link_id`, `link_type: mqtt`, `topics: device`, `msg_encrypted_version: 2.0`
+  - `paho-mqtt` for MQTT connection
+  - AES-GCM decrypt logic matching Tuya OpenMQ custom mode.
+- Added `OPEN_HUB_ACCESS_CONFIG_ENDPOINT` to `const.py`.
+- Added `TuyaCloudApi.async_get_open_hub_access_config()`.
+- Added `TuyaCloudApi.uid` property and fallback UID resolution from device details.
+- Changed `manifest.json`:
+  - `iot_class`: `cloud_push`
+  - requirements: `paho-mqtt>=1.6.1`, `pycryptodome>=3.15.0`
+- Restored the existing Call Active entity identity:
+  - unique ID: `smart_conlock_tuya_{device_id}_call_active`
+  - display name: `Call Active`
+- Do not use `smart_conlock_tuya_{device_id}_video_call_request`; that caused Home Assistant to show the old Call Active entity as no longer provided.
+- Runtime request events are filtered by configured `device_id`.
+- `doorbell` and `initiative_message` only open the 90-second unlock window when the event has a real timestamp.
+- Untimed/latest status values such as stale `doorbell: true` or `video_request_realtime: AQABAQ==` do not open the unlock window.
+- `video_request_realtime` and `photo_again` are exposed as diagnostic attributes only.
+
+Latest validation passed after this implementation:
+
+```bash
+env PYTHONPYCACHEPREFIX=/tmp/smart-conlock-tuya-pycache python3 -m compileall -f custom_components/smart_conlock_tuya
+git diff --check
+```
+
+Also passed a local smoke test for:
+
+- wrong `device_id` ignored
+- untimed `doorbell` ignored
+- `video_request_realtime` stored as diagnostic only
+- timestamped valid `initiative_message` activates the request window
+- nested `photo_again` payload parsing
+
+## Important Correction From Prior Attempt
+
+A prior implementation incorrectly tried to use Tuya SDK `TuyaOpenAPI.connect()` and `TuyaOpenMQ`.
+
+Problem:
+
+- SDK `connect()` is a username/password login flow, not the integration's existing `/v1.0/token?grant_type=1` Cloud project token flow.
+- It can leave MQTT startup doing nothing or failing silently for this integration.
+
+Corrected approach:
+
+- Use the integration's existing signed Cloud API client.
+- Request Open Hub MQTT access config directly with the existing token/signing flow.
+- Use only the MQTT/decryption behavior from Tuya OpenMQ as a reference, not its login/bootstrap.
 
 ## Important Problem Found
 
@@ -106,7 +171,7 @@ Target architecture:
    - `doorbell`
    - `initiative_message`
    - `video_request_realtime`
-3. When a request event arrives, set `Video Call Request` to on immediately.
+3. When a request event arrives, set `Call Active` to on immediately.
 4. Open an unlock window for 90 seconds.
 5. Make the lock entity available during that window if the device is online.
 6. After the window expires, turn request state off and make unlock unavailable again.
@@ -140,29 +205,25 @@ Device mapping from `Tuya/devices.json`:
 - `video_request_realtime`: DP 63 Raw
 - `initiative_message`: DP 212 Raw
 
-## Suggested Next Implementation Plan
+## Suggested Next Testing Plan
 
-1. Revert or replace 3-second polling before release.
-2. Add a shared runtime state object/coordinator for this integration entry:
-   - online state
-   - request active state
-   - request expiration timestamp
-   - last event payload
-   - diagnostic status
-3. Add Tuya Device Status Notification MQTT client support.
-4. On message:
-   - filter by `device_id`
-   - parse DP code/value
-   - detect request event
-   - update coordinator state
-   - call `async_write_ha_state()` on affected entities
-5. Add a fallback polling mode only if MQTT is unavailable:
-   - online: slow interval such as 60 seconds
-   - report logs: either manual/debug or slow fallback, not 3 seconds
-6. Update README:
-   - Device Status Notification is required for realtime request detection
-   - report logs are fallback/debug
-   - video services are only needed for stream/media, not doorbell event detection
+1. Restart Home Assistant and confirm the existing `Call Active` entity is provided again.
+2. Check the `Call Active` attributes:
+   - `diagnostic_status`
+   - `last_error`
+   - `report_log_error`
+   - `doorbell`
+   - `video_request_realtime`
+   - `photo_again`
+   - `initiative_message_decoded`
+3. Confirm MQTT startup:
+   - If `diagnostic_status` is `push_connected`, Device Status Notification is connected.
+   - If `diagnostic_status` is `push_unavailable`, inspect `last_error`.
+4. Press the lock doorbell and confirm:
+   - `Call Active` turns on immediately or within the event path timing.
+   - The lock entity becomes available only while the device is online and the 90-second request window is active.
+   - `video_request_realtime` remains diagnostic only.
+5. If MQTT does not connect, use the diagnostic attributes/logs to decide whether the access-config endpoint needs a different service permission, UID, region, or request body.
 
 ## Things To Avoid
 
@@ -171,4 +232,3 @@ Device mapping from `Tuya/devices.json`:
 - Do not force push.
 - Do not keep aggressive 3-second REST polling as production behavior.
 - Do not assume Tuya video services are required for the doorbell/request event. The event path should come from Device Status Notification.
-
