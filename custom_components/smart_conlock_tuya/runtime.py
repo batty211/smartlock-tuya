@@ -27,6 +27,7 @@ REQUEST_EVENT_CODES = {
     "video_request_realtime",
     "photo_again",
 }
+LOCK_STATE_CODES = {"lock_motor_state"}
 ONLINE_CODES = {"online", "device_online", "net_state", "connectivity"}
 GCM_TAG_LENGTH = 16
 
@@ -251,6 +252,11 @@ class SmartConlockRuntimeState:
     video_request_realtime: Any = None
     photo_again: Any = None
     initiative_message_decoded: dict[str, Any] | None = None
+    locked: bool | None = None
+    lock_motor_state: Any = None
+    lock_report_log_error: str | None = None
+    lock_report_log_count: int | None = None
+    last_lock_operation: dict[str, Any] | None = None
     push_connect_result: int | None = None
     push_topic_count: int | None = None
     push_subscribed_topic_count: int | None = None
@@ -306,6 +312,16 @@ class SmartConlockRuntimeState:
             "push_last_parsed_event_count": self.push_last_parsed_event_count,
             "push_last_event_codes": self.push_last_event_codes,
             "push_last_ignored_device_id": self.push_last_ignored_device_id,
+        }
+
+    def lock_state(self) -> dict[str, Any]:
+        """Return a Home Assistant attribute friendly lock state."""
+        return {
+            "locked": self.locked,
+            "lock_motor_state": self.lock_motor_state,
+            "lock_report_log_error": self.lock_report_log_error,
+            "lock_report_log_count": self.lock_report_log_count,
+            "last_lock_operation": self.last_lock_operation,
         }
 
 
@@ -395,6 +411,13 @@ class SmartConlockRuntime:
             self.state.diagnostic_status = "fallback_error"
             changed = True
 
+        try:
+            lock_state = await self.api.async_get_lock_activity_state(self.device_id)
+            changed = self._merge_fallback_lock_state(lock_state) or changed
+        except Exception as err:  # noqa: BLE001
+            self.state.last_error = f"lock_state_refresh_failed: {err}"
+            changed = True
+
         if changed:
             self.async_notify_listeners()
 
@@ -440,6 +463,19 @@ class SmartConlockRuntime:
 
         return before != self.state.request_state()
 
+    def _merge_fallback_lock_state(self, lock_state: dict[str, Any]) -> bool:
+        """Merge slow status/report-log lock state into runtime state."""
+        before = self.state.lock_state()
+
+        self.state.locked = lock_state.get("locked")
+        self.state.lock_motor_state = lock_state.get("lock_motor_state")
+        self.state.lock_report_log_error = lock_state.get("lock_report_log_error")
+        self.state.lock_report_log_count = lock_state.get("lock_report_log_count")
+        if lock_state.get("last_lock_operation") is not None:
+            self.state.last_lock_operation = lock_state.get("last_lock_operation")
+
+        return before != self.state.lock_state()
+
     async def async_handle_message(self, message: Any) -> None:
         """Handle a Tuya Device Status Notification message."""
         changed = False
@@ -473,6 +509,22 @@ class SmartConlockRuntime:
                 online = self.api.is_call_active_value(value)
                 if online != self.state.online and online is not None:
                     self.state.online = online
+                    changed = True
+                continue
+
+            if code in LOCK_STATE_CODES:
+                locked = self.api.interpret_lock_motor_state(value)
+                if locked is not None:
+                    self.state.locked = locked
+                    self.state.lock_motor_state = value
+                    self.state.last_lock_operation = {
+                        "action": "locked" if locked else "unlocked",
+                        "source": "push",
+                        "event_time": self.api._event_time_ms(event_time)
+                        if has_event_time
+                        else int(time.time() * 1000),
+                        "value": value,
+                    }
                     changed = True
                 continue
 
@@ -595,6 +647,23 @@ class SmartConlockRuntime:
         )
         if notify:
             self.async_notify_listeners()
+
+    @callback
+    def record_home_assistant_operation(
+        self,
+        action: str,
+        locked: bool,
+        source: str = "home_assistant",
+    ) -> None:
+        """Record a local lock state change immediately."""
+        self.state.locked = locked
+        self.state.last_lock_operation = {
+            "action": action,
+            "source": source,
+            "event_time": int(time.time() * 1000),
+            "value": None,
+        }
+        self.async_notify_listeners()
 
     @callback
     def _expire_request(self, _now: Any = None) -> None:

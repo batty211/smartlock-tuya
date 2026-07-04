@@ -232,3 +232,124 @@ Device mapping from `Tuya/devices.json`:
 - Do not force push.
 - Do not keep aggressive 3-second REST polling as production behavior.
 - Do not assume Tuya video services are required for the doorbell/request event. The event path should come from Device Status Notification.
+
+## 2026-07-04 Latest Runtime Findings
+
+The `jtmspro` request-aware unlock flow now works through the report-log fallback.
+
+Observed Home Assistant state after pressing the smart lock doorbell:
+
+- `diagnostic_status`: `fallback_recent_request_detected`
+- `report_log_error`: `null`
+- `report_log_count`: `5`
+- `source`: `initiative_message`
+- `doorbell`: `"true"`
+- `video_request_realtime`: `AAABAQ==`
+- `initiative_message_decoded` contains:
+  - `cmd`: `door_lock_video`
+  - `type`: `media`
+  - `alarm`: `true`
+  - `files`: includes `.jpg` and `.mjpeg` resource paths
+- `Call Active` turns on and the lock can be unlocked.
+
+Important timing note:
+
+- This is still slower than ideal because it is using the 60-second report-log fallback.
+- It may arrive close to the end of the real device's active unlock window.
+- The realtime push path is still not delivering messages to Home Assistant.
+
+Push diagnostics showed:
+
+- `push_connect_result`: `0`
+- `push_topic_count`: `1`
+- `push_subscribed_topic_count`: `1`
+- `push_last_subscribe_status`: `ok`
+- `push_message_count`: `0`
+
+Interpretation:
+
+- Device events reach Tuya Cloud.
+- Home Assistant can get Open Hub MQTT config, connect, and subscribe.
+- No MQTT messages are arriving on the subscribed topic, so the current problem is before decrypt/parse.
+- Do not keep debugging decoded MQTT payload shape until `push_message_count` becomes nonzero.
+
+## Changes Made In This Session
+
+- Fixed Tuya report-log request signing/query handling so report logs can be read.
+- Added push diagnostics for Open Hub MQTT connection, subscription, message, decode, and parser stages.
+- Exposed push diagnostics as attributes on `binary_sensor.<lock_name>_call_active`.
+- Made the MQTT event parser accept decoded payload roots that are lists.
+- Made report-log fallback handle timestamp fields beyond only `event_time`.
+- Made `initiative_message` fallback use decoded payload `time` when the report-log wrapper does not expose a usable timestamp.
+- Confirmed report-log fallback can activate the 90-second unlock window from `initiative_message`.
+
+Latest validation passed:
+
+```bash
+env PYTHONPYCACHEPREFIX=/tmp/smart-conlock-tuya-pycache python3 -m compileall -f custom_components/smart_conlock_tuya
+git diff --check
+```
+
+## Lock State / History Work Continued
+
+Implemented after reading these notes:
+
+- Added `lock_motor_state` interpretation through `TuyaCloudApi.interpret_lock_motor_state()`.
+- Added `TuyaCloudApi.async_get_lock_activity_state()`:
+  - Reads current `/v1.0/iot-03/devices/{device_id}/status`.
+  - Reads recent `lock_motor_state` report logs over a 24-hour lookback.
+  - Returns raw `lock_motor_state`, parsed Home Assistant `locked` state, report-log diagnostics, and latest operation evidence when present.
+- Added runtime storage for:
+  - `locked`
+  - `lock_motor_state`
+  - `lock_report_log_error`
+  - `lock_report_log_count`
+  - `last_lock_operation`
+- Added push handling for `lock_motor_state` if Device Status Notification eventually starts delivering messages.
+- Updated the lock entity so:
+  - `jtmspro` lock state syncs from the shared runtime.
+  - non-`jtmspro` lock entities can poll `lock_motor_state` through the existing status endpoint.
+  - successful Home Assistant lock/unlock commands immediately update the visible state.
+  - successful lock/unlock commands fire a Home Assistant event named `smart_conlock_tuya_lock_operation`.
+  - auto-lock timer state is recorded as `auto_lock_timer_estimate`.
+- Added lock attributes for `jtmspro`:
+  - `lock_motor_state`
+  - `lock_report_log_error`
+  - `lock_report_log_count`
+  - `last_lock_operation`
+
+Latest validation passed:
+
+```bash
+env PYTHONPYCACHEPREFIX=/tmp/smart-conlock-tuya-pycache python3 -m compileall -f custom_components/smart_conlock_tuya
+git diff --check
+```
+
+Important caveat:
+
+- `/Users/bordin/Devs/Tuya/devices.json` did not include `lock_motor_state`, so real-device values still need to be confirmed in Home Assistant attributes.
+- Current parser assumes Tuya boolean `true`/`1`/`open` means unlocked and `false`/`0`/`closed` means locked, matching the prior local helper comment. If the real device reports opposite values, invert this parser.
+
+## Next Feature Requests
+
+The user wants to continue with these features next:
+
+1. Add logs/history for lock and unlock operations.
+   - Partially implemented via `last_lock_operation`, `lock_motor_state` report-log lookup, and `smart_conlock_tuya_lock_operation` HA events.
+   - Next step: restart Home Assistant, lock/unlock once, and confirm whether report logs include `lock_motor_state` entries with useful source/operator fields.
+   - Goal: show when the lock was locked/unlocked and, if possible, whether the operation came from Home Assistant, device/app, or Tuya report logs.
+   - Likely sources to investigate: Tuya report logs/status codes, existing `lock.py` command result paths, and Home Assistant logbook/event entities.
+
+2. Show the current lock state: locked or unlocked.
+   - Implemented using `lock_motor_state`, but real-device raw values still need confirmation.
+   - Goal: expose a reliable Home Assistant lock state instead of only command capability.
+   - Likely DP/code to verify from current code/device data: `lock_motor_state`.
+   - Need to confirm real values returned by `/v1.0/iot-03/devices/{device_id}/status` for locked vs unlocked.
+
+3. Show a still image from the smart lock camera.
+   - Goal: image only, not video.
+   - The decoded `initiative_message.files` includes `.jpg` resource paths.
+   - Existing API helpers to investigate:
+     - `GET /v1.0/devices/{device_id}/door-lock/latest/media/url?file_type=1`
+     - `GET /v1.0/smart-lock/devices/{device_id}/albums-media`
+   - Need to determine whether Tuya returns a directly usable signed image URL, encrypted media, or requires additional video/cloud-storage service permissions.

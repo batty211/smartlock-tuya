@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 
 from homeassistant.components.lock import LockEntity
 from homeassistant.config_entries import ConfigEntry
@@ -15,6 +16,7 @@ from .runtime import SmartConlockRuntime
 _LOGGER = logging.getLogger(__name__)
 
 DEFAULT_AUTO_LOCK_DELAY = 3
+LOCK_OPERATION_EVENT = "smart_conlock_tuya_lock_operation"
 
 
 async def async_setup_entry(
@@ -76,9 +78,10 @@ class TuyaSmartLock(LockEntity):
         self._attr_is_locking = False
         self._attr_is_unlocking = False
         self._attr_available = device_category != "jtmspro"
-        self._attr_should_poll = False
+        self._attr_should_poll = device_category != "jtmspro"
         self._device_name = device_name
         self._request_state = {}
+        self._lock_state = {}
         self._unsub_runtime: CALLBACK_TYPE | None = None
 
     @property
@@ -110,12 +113,19 @@ class TuyaSmartLock(LockEntity):
             "call_active_seconds_since_event": self._request_state.get(
                 "seconds_since_event"
             ),
+            "lock_motor_state": self._lock_state.get("lock_motor_state"),
+            "lock_report_log_error": self._lock_state.get("lock_report_log_error"),
+            "lock_report_log_count": self._lock_state.get("lock_report_log_count"),
+            "last_lock_operation": self._lock_state.get("last_lock_operation"),
         }
 
     async def async_update(self) -> None:
         """Update lock availability."""
         if self._device_category != "jtmspro":
             self._attr_available = True
+            locked = await self._api.async_get_lock_state(self._device_id)
+            if locked is not None:
+                self._attr_is_locked = locked
             return
 
         if self._runtime is not None:
@@ -151,7 +161,7 @@ class TuyaSmartLock(LockEntity):
 
         self._attr_is_locking = False
         if success:
-            self._attr_is_locked = True
+            self._record_successful_operation("locked", True)
         self.async_write_ha_state()
 
     async def async_unlock(self, **kwargs) -> None:
@@ -165,7 +175,7 @@ class TuyaSmartLock(LockEntity):
 
         self._attr_is_unlocking = False
         if success:
-            self._attr_is_locked = False
+            self._record_successful_operation("unlocked", False)
         self.async_write_ha_state()
 
         if success:
@@ -204,15 +214,56 @@ class TuyaSmartLock(LockEntity):
         if self._runtime is None:
             self._attr_available = False
             self._request_state = {"active": False, "diagnostic_status": "no_runtime"}
+            self._lock_state = {}
             return None, False
 
         self._request_state = self._runtime.state.request_state()
+        self._lock_state = self._runtime.state.lock_state()
         online = self._runtime.state.online
         call_active = self._request_state["active"]
+        locked = self._lock_state.get("locked")
+        if locked is not None:
+            self._attr_is_locked = locked
         self._attr_available = online is True and call_active is True
         return online, call_active
 
+    def _record_successful_operation(
+        self,
+        action: str,
+        locked: bool,
+        source: str = "home_assistant",
+    ) -> None:
+        """Record a successful lock operation and emit a Home Assistant event."""
+        self._attr_is_locked = locked
+        event_time = int(time.time() * 1000)
+        operation = {
+            "action": action,
+            "source": source,
+            "event_time": event_time,
+            "value": None,
+        }
+        self._lock_state = {**self._lock_state, "last_lock_operation": operation}
+
+        if self._runtime is not None:
+            self._runtime.record_home_assistant_operation(action, locked, source)
+
+        self.hass.bus.async_fire(
+            LOCK_OPERATION_EVENT,
+            {
+                "entity_id": self.entity_id,
+                "device_id": self._device_id,
+                "device_name": self._device_name,
+                "action": action,
+                "source": source,
+                "event_time": event_time,
+            },
+        )
+
     def _set_locked(self) -> None:
         """Reset state to locked after auto-lock delay."""
-        self._attr_is_locked = True
+        self._record_successful_operation(
+            "locked",
+            True,
+            source="auto_lock_timer_estimate",
+        )
         self.async_write_ha_state()
