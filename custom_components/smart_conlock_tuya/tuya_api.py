@@ -108,11 +108,11 @@ class TuyaCloudApi:
         self._token_expiry = time.time() + result["expire_time"] - 60
         self._uid = result.get("uid")
 
-    def _sign_request(self, method: str, path: str, body: str = "") -> dict:
+    def _sign_request(self, method: str, request_target: str, body: str = "") -> dict:
         """Build signed headers for a Tuya API request."""
         t = str(int(time.time() * 1000))
         content_hash = hashlib.sha256(body.encode()).hexdigest()
-        string_to_sign = f"{method}\n{content_hash}\n\n{path}"
+        string_to_sign = f"{method}\n{content_hash}\n\n{request_target}"
         sign_str = self._access_id + self._token + t + string_to_sign
         sign = hmac.new(
             self._access_secret.encode(),
@@ -129,20 +129,50 @@ class TuyaCloudApi:
             "Content-Type": "application/json",
         }
 
-    async def _request(self, method: str, path: str, body: dict | None = None) -> dict:
+    def _request_target(
+        self,
+        path: str,
+        params: dict[str, Any] | None = None,
+    ) -> str:
+        """Build the path and sorted query string used for signing and request."""
+        if not params:
+            return path
+
+        query = urlencode(sorted(params.items()))
+        return f"{path}?{query}"
+
+    async def _request(
+        self,
+        method: str,
+        path: str,
+        body: dict | None = None,
+        params: dict[str, Any] | None = None,
+    ) -> dict:
         """Make a signed request to the Tuya API."""
         await self._ensure_token()
-        url = f"{self._base_url}{path}"
-        body_str = json.dumps(body) if body else ""
-        headers = self._sign_request(method, path, body_str)
+        request_target = self._request_target(path, params)
+        url = f"{self._base_url}{request_target}"
+        body_str = json.dumps(body) if body is not None else ""
+        headers = self._sign_request(method, request_target, body_str)
 
         async with aiohttp.ClientSession() as session:
             if method == "GET":
                 async with session.get(url, headers=headers) as resp:
-                    return await resp.json()
+                    data = await resp.json()
             else:
                 async with session.post(url, headers=headers, data=body_str) as resp:
-                    return await resp.json()
+                    data = await resp.json()
+
+        if not data.get("success"):
+            _LOGGER.debug(
+                "Tuya API request failed: method=%s endpoint=%s code=%s msg=%s",
+                method,
+                path,
+                data.get("code"),
+                data.get("msg"),
+            )
+
+        return data
 
     async def async_test_credentials(self) -> bool:
         """Test if the credentials are valid."""
@@ -273,11 +303,8 @@ class TuyaCloudApi:
             "last_row_key": "",
             "size": size,
         }
-        path = (
-            f"{REPORT_LOGS_ENDPOINT.format(device_id=device_id)}?"
-            f"{urlencode(params, safe=',')}"
-        )
-        resp = await self._request("GET", path)
+        path = REPORT_LOGS_ENDPOINT.format(device_id=device_id)
+        resp = await self._request("GET", path, params=params)
 
         if not resp.get("success"):
             self._last_report_logs_error = resp.get("msg") or str(resp.get("code"))
@@ -497,7 +524,7 @@ class TuyaCloudApi:
     ) -> dict | None:
         """Get latest lock media URL metadata for investigation."""
         path = LATEST_MEDIA_ENDPOINT.format(device_id=device_id)
-        resp = await self._request("GET", f"{path}?file_type={file_type}")
+        resp = await self._request("GET", path, params={"file_type": file_type})
 
         if not resp.get("success"):
             _LOGGER.warning("Could not get latest media URL: %s", resp.get("msg"))
