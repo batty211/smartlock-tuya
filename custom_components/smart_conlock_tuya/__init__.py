@@ -14,6 +14,7 @@ from .const import (
     CONF_DEVICE_ID,
     DOMAIN,
 )
+from .runtime import SmartConlockRuntime
 from .tuya_api import TuyaCloudApi
 
 _LOGGER = logging.getLogger(__name__)
@@ -45,10 +46,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             if device_info:
                 entry_data[CONF_DEVICE_CATEGORY] = device_info.get("category", "")
 
+    runtime = None
+    if entry_data.get(CONF_DEVICE_CATEGORY) == "jtmspro":
+        runtime = SmartConlockRuntime(
+            hass,
+            api,
+            entry_data,
+            entry_data[CONF_DEVICE_ID],
+        )
+        await runtime.async_start()
+
     hass.data[DOMAIN][entry.entry_id] = {
         "api": api,
         "entry_data": entry_data,
         "device_info": device_info,
+        "runtime": runtime,
     }
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
@@ -59,5 +71,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok:
-        hass.data[DOMAIN].pop(entry.entry_id, None)
+        data = hass.data[DOMAIN].pop(entry.entry_id, None)
+        if data and data.get("runtime"):
+            await data["runtime"].async_stop()
     return unload_ok

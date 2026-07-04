@@ -21,7 +21,7 @@ Smart (Con)lock tuya uses the Cloud API ticket-based flow to send lock/unlock co
 | Lock | `lock` | Lock and unlock your door via Tuya Cloud API |
 | Battery | `sensor` | Shows the raw Tuya battery enum (`high`, `medium`, `low`, `poweroff`) and an estimated percentage attribute |
 | Online | `binary_sensor` | Shows whether a `jtmspro` device is online |
-| Call Active | `binary_sensor` | Shows whether a `jtmspro` video call/session appears active based on Tuya datapoints |
+| Video Call Request | `binary_sensor` | Shows whether a recent `jtmspro` doorbell/video request was detected from Tuya Device Status Notification |
 
 The lock entity is linked to your existing Tuya device in Home Assistant. It appears alongside the `binary_sensor` from the official Tuya integration, all grouped under the same device.
 
@@ -56,7 +56,8 @@ Before installing, you need to set up a few things on the Tuya IoT Platform. Thi
 2. Click **Go to Authorize** (or find the service list)
 3. Search for and subscribe to **IoT Core** (Free Trial)
 4. Search for and subscribe to **Smart Lock Open Service** (Free Trial)
-5. For video lock investigation features, you may also need **IoT Video Live Stream** and **Video Cloud Storage** depending on your device and Tuya account.
+5. For `jtmspro` realtime doorbell/request detection, subscribe to **Device Status Notification**.
+6. For video lock investigation features, you may also need **IoT Video Live Stream** and **Video Cloud Storage** depending on your device and Tuya account.
 
 Both services are free for personal use. They may require periodic renewal (every ~6 months) — you'll get an email when it's time.
 
@@ -130,11 +131,13 @@ It also exposes `battery_percent_estimate`:
 For category `jtmspro`, the integration adds:
 
 - `binary_sensor.<lock_name>_online`
-- `binary_sensor.<lock_name>_call_active`
+- `binary_sensor.<lock_name>_video_call_request`
 
-The online sensor uses Tuya device details from `GET /v1.0/devices/{device_id}`.
+The online sensor uses Tuya Device Status Notification when available, with slow REST refresh from `GET /v1.0/devices/{device_id}` as fallback.
 
-The call-active sensor is based on recent Tuya report logs for `doorbell` and `initiative_message`, with `video_request_realtime` exposed as debugging evidence. This avoids relying on stale latest-status values for video lock request state.
+The video call request sensor is event-driven. It listens for Tuya Device Status Notification messages for `doorbell` and `initiative_message`, and opens a 90-second unlock window when a valid request arrives. `video_request_realtime` is exposed as debugging evidence only until real-device start/end behavior is confirmed.
+
+Recent Tuya report logs are kept as a slow 60-second fallback/debug path. If push or report-log fallback cannot be read, the Video Call Request sensor exposes `diagnostic_status`, `last_error`, and `report_log_error` attributes.
 
 Unlock protection for `jtmspro`:
 
@@ -153,7 +156,7 @@ Relevant Tuya APIs:
 - `GET /v1.0/devices/{device_id}/door-lock/latest/media/url?file_type=1`
 - `GET /v1.0/smart-lock/devices/{device_id}/albums-media`
 
-Tuya media may be encrypted and may require additional Tuya API service subscriptions.
+Tuya media may be encrypted and may require additional Tuya API service subscriptions. These video services are for stream/media access and are not required for doorbell request event detection when Device Status Notification is enabled.
 
 ## Supported devices
 
@@ -176,7 +179,7 @@ If your lock device uses the Tuya ticket-based unlock flow, it should work. If i
 
 - **Cloud-only**: Tuya locks do not support local control. Commands go through the Tuya Cloud API. If your internet is down, you can still use the physical keypad/badge/fingerprint on the device itself.
 - **API trial renewal**: IoT Core and Smart Lock Open Service are free but require renewal approximately every 6 months on iot.tuya.com.
-- **Optimistic state**: State updates are optimistic with post-command verification (polls the cloud 5 seconds after a command). There is no real-time push from the device.
+- **Push-based request detection**: `jtmspro` request state uses Tuya Device Status Notification. Report logs are only a slow fallback/debug path.
 - **Video call detection**: `jtmspro` call detection is based on Tuya datapoints, not a dedicated doorbell session API.
 - **Camera entity not included**: Stream, WebRTC, latest media, and album APIs are available as investigation helpers only.
 
@@ -188,7 +191,7 @@ If your lock device uses the Tuya ticket-based unlock flow, it should work. If i
 | `permission deny` | Your Smart Life / Tuya app account is not linked to the IoT project. See Prerequisites step 2. |
 | No devices found during setup | Make sure your app account is linked and your device is a supported lock category. |
 | Unlock command succeeds but door doesn't open | Enable Remote Unlock in the Tuya / Smart Life app settings for your device. |
-| `jtmspro` unlock is refused | Make sure the lock is online and that a video call/session is active. Check the Call Active sensor attributes for raw datapoint values. |
+| `jtmspro` unlock is refused | Make sure the lock is online and that a recent doorbell/video request is active. Check the Video Call Request sensor attributes for `diagnostic_status`, `report_log_error`, and raw datapoint values. |
 | No video stream or media URL | Confirm your Tuya project has the required video/media API services enabled and test the endpoint in Tuya API Explorer. |
 | `invalid_auth` during setup | Double-check your Access ID and Access Secret. Make sure you're using the credentials from the correct project. |
 

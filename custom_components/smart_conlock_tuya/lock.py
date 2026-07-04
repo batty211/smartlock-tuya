@@ -6,10 +6,11 @@ import logging
 
 from homeassistant.components.lock import LockEntity
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.core import CALLBACK_TYPE, HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import CONF_DEVICE_CATEGORY, CONF_DEVICE_ID, CONF_DEVICE_NAME, DOMAIN
+from .runtime import SmartConlockRuntime
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -24,6 +25,7 @@ async def async_setup_entry(
     """Set up lock entity from config entry."""
     data = hass.data[DOMAIN][entry.entry_id]
     api = data["api"]
+    runtime = data.get("runtime")
     entry_data = data["entry_data"]
     device_id = entry_data[CONF_DEVICE_ID]
     device_name = entry_data[CONF_DEVICE_NAME]
@@ -35,7 +37,16 @@ async def async_setup_entry(
         auto_lock_time = DEFAULT_AUTO_LOCK_DELAY
 
     async_add_entities(
-        [TuyaSmartLock(api, device_id, device_name, device_category, auto_lock_time)],
+        [
+            TuyaSmartLock(
+                api,
+                runtime,
+                device_id,
+                device_name,
+                device_category,
+                auto_lock_time,
+            )
+        ],
         True,
     )
 
@@ -49,12 +60,14 @@ class TuyaSmartLock(LockEntity):
     def __init__(
         self,
         api,
+        runtime: SmartConlockRuntime | None,
         device_id: str,
         device_name: str,
         device_category: str | None,
         auto_lock_time: int,
     ) -> None:
         self._api = api
+        self._runtime = runtime
         self._device_id = device_id
         self._device_category = device_category
         self._auto_lock_time = auto_lock_time
@@ -63,9 +76,10 @@ class TuyaSmartLock(LockEntity):
         self._attr_is_locking = False
         self._attr_is_unlocking = False
         self._attr_available = device_category != "jtmspro"
-        self._attr_should_poll = device_category == "jtmspro"
+        self._attr_should_poll = False
         self._device_name = device_name
         self._request_state = {}
+        self._unsub_runtime: CALLBACK_TYPE | None = None
 
     @property
     def device_info(self):
@@ -82,9 +96,16 @@ class TuyaSmartLock(LockEntity):
         if self._device_category != "jtmspro":
             return {}
 
+        self._sync_from_runtime()
         return {
             "unlock_available": self._attr_available,
             "call_active": self._request_state.get("active"),
+            "call_active_diagnostic_status": self._request_state.get(
+                "diagnostic_status"
+            ),
+            "call_active_report_log_error": self._request_state.get(
+                "report_log_error"
+            ),
             "call_active_source": self._request_state.get("source"),
             "call_active_seconds_since_event": self._request_state.get(
                 "seconds_since_event"
@@ -92,12 +113,34 @@ class TuyaSmartLock(LockEntity):
         }
 
     async def async_update(self) -> None:
-        """Update jtmspro unlock availability."""
+        """Update lock availability."""
         if self._device_category != "jtmspro":
             self._attr_available = True
             return
 
-        await self._async_update_unlock_availability()
+        if self._runtime is not None:
+            await self._runtime.async_refresh_fallback()
+        self._sync_from_runtime()
+
+    async def async_added_to_hass(self) -> None:
+        """Subscribe to runtime state changes."""
+        if self._runtime is None:
+            return
+        self._unsub_runtime = self._runtime.async_add_listener(
+            self._handle_runtime_update
+        )
+        self._sync_from_runtime()
+
+    async def async_will_remove_from_hass(self) -> None:
+        """Unsubscribe from runtime state changes."""
+        if self._unsub_runtime:
+            self._unsub_runtime()
+            self._unsub_runtime = None
+
+    def _handle_runtime_update(self) -> None:
+        """Handle runtime state updates."""
+        self._sync_from_runtime()
+        self.async_write_ha_state()
 
     async def async_lock(self, **kwargs) -> None:
         """Lock the door."""
@@ -135,7 +178,7 @@ class TuyaSmartLock(LockEntity):
         if self._device_category != "jtmspro":
             return True
 
-        online, call_active = await self._async_update_unlock_availability()
+        online, call_active = self._sync_from_runtime()
         if online is not True:
             _LOGGER.warning(
                 "Refusing to unlock %s because jtmspro device is not online",
@@ -152,12 +195,19 @@ class TuyaSmartLock(LockEntity):
 
         return True
 
-    async def _async_update_unlock_availability(self) -> tuple[bool | None, bool | None]:
-        """Fetch and store whether unlock should be available for a jtmspro lock."""
-        online = await self._api.async_get_device_online(self._device_id)
-        self._request_state = await self._api.async_get_jtmspro_request_state(
-            self._device_id
-        )
+    def _sync_from_runtime(self) -> tuple[bool | None, bool | None]:
+        """Sync lock availability from the shared runtime."""
+        if self._device_category != "jtmspro":
+            self._attr_available = True
+            return True, True
+
+        if self._runtime is None:
+            self._attr_available = False
+            self._request_state = {"active": False, "diagnostic_status": "no_runtime"}
+            return None, False
+
+        self._request_state = self._runtime.state.request_state()
+        online = self._runtime.state.online
         call_active = self._request_state["active"]
         self._attr_available = online is True and call_active is True
         return online, call_active

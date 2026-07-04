@@ -32,8 +32,8 @@ from .const import (
 
 _LOGGER = logging.getLogger(__name__)
 
-TRUTHY_VALUES = {"1", "true", "on", "active"}
-FALSY_VALUES = {"0", "false", "off", "inactive"}
+TRUTHY_VALUES = {"1", "true", "on", "active", "online"}
+FALSY_VALUES = {"0", "false", "off", "inactive", "offline"}
 JTMSPRO_REQUEST_CODES = [
     "doorbell",
     "initiative_message",
@@ -52,6 +52,12 @@ class TuyaCloudApi:
         self._token: str | None = None
         self._token_expiry: float = 0
         self._uid: str | None = None
+        self._last_report_logs_error: str | None = None
+
+    @property
+    def base_url(self) -> str:
+        """Return the Tuya Cloud base URL."""
+        return self._base_url
 
     async def _ensure_token(self) -> None:
         """Get or refresh the access token."""
@@ -242,11 +248,22 @@ class TuyaCloudApi:
         resp = await self._request("GET", path)
 
         if not resp.get("success"):
-            _LOGGER.warning("Could not get report logs: %s", resp.get("msg"))
+            self._last_report_logs_error = resp.get("msg") or str(resp.get("code"))
+            _LOGGER.warning("Could not get report logs: %s", self._last_report_logs_error)
             return None
 
+        self._last_report_logs_error = None
         result = resp.get("result", {})
-        logs = result.get("logs", [])
+        logs = []
+        if isinstance(result, list):
+            logs = result
+        elif isinstance(result, dict):
+            for key in ("logs", "records", "list", "data", "datas"):
+                value = result.get(key)
+                if isinstance(value, list):
+                    logs = value
+                    break
+
         if not isinstance(logs, list):
             return []
 
@@ -279,6 +296,8 @@ class TuyaCloudApi:
 
     def _event_time_ms(self, event_time: Any) -> int:
         """Normalize Tuya event time to milliseconds."""
+        if isinstance(event_time, str) and event_time.isdigit():
+            event_time = int(event_time)
         if not isinstance(event_time, int):
             return 0
         if event_time < 1_000_000_000_000:
@@ -334,7 +353,13 @@ class TuyaCloudApi:
         )
 
         state: dict[str, Any] = {
-            "active": None if logs is None else False,
+            "active": False,
+            "diagnostic_status": "report_logs_unavailable"
+            if logs is None
+            else "no_recent_request",
+            "report_log_error": self._last_report_logs_error,
+            "report_log_count": None if logs is None else len(logs),
+            "request_window_seconds": window_seconds,
             "source": None,
             "last_event_time": None,
             "seconds_since_event": None,
@@ -377,6 +402,7 @@ class TuyaCloudApi:
                 or initiative_active
             ):
                 state["active"] = True
+                state["diagnostic_status"] = "recent_request_detected"
                 state["source"] = code
                 state["last_event_time"] = event_time
                 state["seconds_since_event"] = max(0, (now_ms - event_time) // 1000)
