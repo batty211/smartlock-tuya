@@ -39,10 +39,12 @@ class DeviceStatusNotificationClient:
         api: TuyaCloudApi,
         uid: str,
         message_callback: Callable[[dict[str, Any]], None],
+        diagnostic_callback: Callable[[dict[str, Any]], None],
     ) -> None:
         self._api = api
         self._uid = uid
         self._message_callback = message_callback
+        self._diagnostic_callback = diagnostic_callback
         self._client: Any = None
         self._password = ""
         self._source_topic: Any = {}
@@ -62,6 +64,18 @@ class DeviceStatusNotificationClient:
         )
         if config is None:
             raise ConnectionError("Open Hub access config unavailable")
+
+        topics = _iter_topics(config.get("source_topic", {}))
+        self._emit_diagnostic(
+            "access_config",
+            topic_count=len(topics),
+            subscribed_topic_count=0,
+        )
+        _LOGGER.debug(
+            "Tuya Device Status Notification config ready: topic_count=%s expire_time=%s",
+            len(topics),
+            config.get("expire_time"),
+        )
 
         await hass.async_add_executor_job(self._start, config)
 
@@ -93,6 +107,7 @@ class DeviceStatusNotificationClient:
         if not url.hostname or not url.port:
             raise ConnectionError(f"Invalid MQTT URL: {config.get('url')}")
 
+        _LOGGER.debug("Connecting Tuya Device Status Notification MQTT")
         mqttc.connect(url.hostname, url.port)
         mqttc.loop_start()
         self._client = mqttc
@@ -107,12 +122,51 @@ class DeviceStatusNotificationClient:
 
     def _on_connect(self, mqttc: Any, _userdata: Any, _flags: Any, rc: int) -> None:
         """Subscribe to device topics after connecting."""
+        topics = _iter_topics(self._source_topic)
+        self._emit_diagnostic(
+            "connect",
+            connect_result=rc,
+            topic_count=len(topics),
+        )
+        _LOGGER.debug(
+            "Tuya Device Status Notification MQTT connected: rc=%s topic_count=%s",
+            rc,
+            len(topics),
+        )
         if rc != 0:
             _LOGGER.warning("Tuya Device Status Notification connect failed: %s", rc)
             return
 
-        for topic in _iter_topics(self._source_topic):
-            mqttc.subscribe(topic)
+        if not topics:
+            self._emit_diagnostic(
+                "subscribe",
+                subscribed_topic_count=0,
+                last_subscribe_status="no_topics",
+            )
+            _LOGGER.debug("Tuya Device Status Notification has no topics to subscribe")
+            return
+
+        subscribed = 0
+        last_status = "unknown"
+        for topic in topics:
+            result, _mid = mqttc.subscribe(topic)
+            if result == 0:
+                subscribed += 1
+                last_status = "ok"
+            else:
+                last_status = f"result_{result}"
+
+        self._emit_diagnostic(
+            "subscribe",
+            subscribed_topic_count=subscribed,
+            last_subscribe_status=last_status,
+        )
+        _LOGGER.debug(
+            "Tuya Device Status Notification subscribed: subscribed_topic_count=%s topic_count=%s last_status=%s",
+            subscribed,
+            len(topics),
+            last_status,
+        )
 
     def _on_disconnect(self, _mqttc: Any, _userdata: Any, rc: int) -> None:
         """Log unexpected disconnects."""
@@ -123,6 +177,14 @@ class DeviceStatusNotificationClient:
         """Decode and forward MQTT messages."""
         try:
             msg_dict = json.loads(msg.payload.decode("utf8"))
+            self._emit_diagnostic(
+                "message",
+                wrapper_keys=_safe_keys(msg_dict),
+            )
+            _LOGGER.debug(
+                "Tuya Device Status Notification message received: wrapper_keys=%s",
+                _safe_keys(msg_dict),
+            )
             event_time = msg_dict.get("t", "")
             decoded_data = self._decode_message(
                 msg_dict["data"],
@@ -130,9 +192,26 @@ class DeviceStatusNotificationClient:
                 event_time,
             )
             msg_dict["data"] = decoded_data
+            self._emit_diagnostic(
+                "decoded",
+                decoded_payload_type=type(decoded_data).__name__,
+                decoded_payload_keys=_safe_keys(decoded_data),
+                decode_error=None,
+            )
+            _LOGGER.debug(
+                "Tuya Device Status Notification payload decoded: type=%s keys=%s",
+                type(decoded_data).__name__,
+                _safe_keys(decoded_data),
+            )
             self._message_callback(msg_dict)
         except Exception as err:  # noqa: BLE001
+            self._emit_diagnostic("decode_error", decode_error=str(err))
             _LOGGER.warning("Could not decode Tuya notification message: %s", err)
+
+    def _emit_diagnostic(self, event: str, **data: Any) -> None:
+        """Emit sanitized diagnostics from the MQTT worker thread."""
+        payload = {"event": event, **data}
+        self._diagnostic_callback(payload)
 
     def _decode_message(self, b64msg: str, password: str, event_time: Any) -> Any:
         """Decode Tuya custom Open Hub AES-GCM payloads."""
@@ -172,6 +251,19 @@ class SmartConlockRuntimeState:
     video_request_realtime: Any = None
     photo_again: Any = None
     initiative_message_decoded: dict[str, Any] | None = None
+    push_connect_result: int | None = None
+    push_topic_count: int | None = None
+    push_subscribed_topic_count: int | None = None
+    push_last_subscribe_status: str | None = None
+    push_message_count: int = 0
+    push_last_message_time: int | None = None
+    push_last_wrapper_keys: list[str] | None = None
+    push_last_decoded_payload_type: str | None = None
+    push_last_decoded_payload_keys: list[str] | None = None
+    push_last_decode_error: str | None = None
+    push_last_parsed_event_count: int | None = None
+    push_last_event_codes: list[str] | None = None
+    push_last_ignored_device_id: str | None = None
 
     def request_state(self) -> dict[str, Any]:
         """Return a Home Assistant attribute friendly request state."""
@@ -201,6 +293,19 @@ class SmartConlockRuntimeState:
             "initiative_message_decoded": self.initiative_message_decoded,
             "last_event_code": self.last_event_code,
             "last_event_value": self.last_event_value,
+            "push_connect_result": self.push_connect_result,
+            "push_topic_count": self.push_topic_count,
+            "push_subscribed_topic_count": self.push_subscribed_topic_count,
+            "push_last_subscribe_status": self.push_last_subscribe_status,
+            "push_message_count": self.push_message_count,
+            "push_last_message_time": self.push_last_message_time,
+            "push_last_wrapper_keys": self.push_last_wrapper_keys,
+            "push_last_decoded_payload_type": self.push_last_decoded_payload_type,
+            "push_last_decoded_payload_keys": self.push_last_decoded_payload_keys,
+            "push_last_decode_error": self.push_last_decode_error,
+            "push_last_parsed_event_count": self.push_last_parsed_event_count,
+            "push_last_event_codes": self.push_last_event_codes,
+            "push_last_ignored_device_id": self.push_last_ignored_device_id,
         }
 
 
@@ -338,8 +443,25 @@ class SmartConlockRuntime:
     async def async_handle_message(self, message: Any) -> None:
         """Handle a Tuya Device Status Notification message."""
         changed = False
-        for event in iter_device_status_events(message):
+        events = iter_device_status_events(message)
+        self.state.push_last_parsed_event_count = len(events)
+        self.state.push_last_event_codes = [
+            event["code"] for event in events if event.get("code") is not None
+        ]
+        changed = True
+        _LOGGER.debug(
+            "Parsed Tuya Device Status Notification events: count=%s codes=%s",
+            len(events),
+            self.state.push_last_event_codes,
+        )
+
+        for event in events:
             if event.get("device_id") and event["device_id"] != self.device_id:
+                self.state.push_last_ignored_device_id = event["device_id"]
+                _LOGGER.debug(
+                    "Ignoring Tuya notification for different device_id: %s",
+                    event["device_id"],
+                )
                 continue
 
             code = event.get("code")
@@ -355,6 +477,7 @@ class SmartConlockRuntime:
                 continue
 
             if code not in REQUEST_EVENT_CODES:
+                _LOGGER.debug("Ignoring unsupported Tuya notification code: %s", code)
                 continue
 
             self.state.last_event_code = code
@@ -366,12 +489,16 @@ class SmartConlockRuntime:
                 self.state.doorbell = value
                 if has_event_time and self.api._is_active_doorbell_value(value):
                     self._activate_request(code, value, event_time, notify=False)
+                    _LOGGER.debug("Activated request window from doorbell push event")
                     changed = True
             elif code == "initiative_message":
                 active, decoded = self.api._is_active_initiative_message(value)
                 self.state.initiative_message_decoded = decoded
                 if has_event_time and active:
                     self._activate_request(code, value, event_time, notify=False)
+                    _LOGGER.debug(
+                        "Activated request window from initiative_message push event"
+                    )
                     changed = True
             elif code == "video_request_realtime":
                 self.state.video_request_realtime = value
@@ -392,10 +519,48 @@ class SmartConlockRuntime:
 
             if not has_event_time and code in {"doorbell", "initiative_message"}:
                 self.state.diagnostic_status = "untimed_event_ignored"
+                _LOGGER.debug(
+                    "Ignoring %s push event because it has no usable event_time",
+                    code,
+                )
                 changed = True
 
         if changed:
             self.async_notify_listeners()
+
+    async def async_handle_push_diagnostic(self, diagnostic: dict[str, Any]) -> None:
+        """Merge sanitized MQTT diagnostics into runtime state."""
+        event = diagnostic.get("event")
+
+        if "connect_result" in diagnostic:
+            self.state.push_connect_result = diagnostic.get("connect_result")
+        if "topic_count" in diagnostic:
+            self.state.push_topic_count = diagnostic.get("topic_count")
+        if "subscribed_topic_count" in diagnostic:
+            self.state.push_subscribed_topic_count = diagnostic.get(
+                "subscribed_topic_count"
+            )
+        if "last_subscribe_status" in diagnostic:
+            self.state.push_last_subscribe_status = diagnostic.get(
+                "last_subscribe_status"
+            )
+
+        if event == "message":
+            self.state.push_message_count += 1
+            self.state.push_last_message_time = int(time.time() * 1000)
+            self.state.push_last_wrapper_keys = diagnostic.get("wrapper_keys")
+        elif event == "decoded":
+            self.state.push_last_decoded_payload_type = diagnostic.get(
+                "decoded_payload_type"
+            )
+            self.state.push_last_decoded_payload_keys = diagnostic.get(
+                "decoded_payload_keys"
+            )
+            self.state.push_last_decode_error = diagnostic.get("decode_error")
+        elif event == "decode_error":
+            self.state.push_last_decode_error = diagnostic.get("decode_error")
+
+        self.async_notify_listeners()
 
     @callback
     def _activate_request(
@@ -451,6 +616,7 @@ class SmartConlockRuntime:
                 self.api,
                 uid,
                 self._handle_mq_message_threadsafe,
+                self._handle_mq_diagnostic_threadsafe,
             )
             await self._mq.async_start(self.hass)
             self.state.diagnostic_status = "push_connected"
@@ -481,6 +647,14 @@ class SmartConlockRuntime:
         """Bridge MQTT callbacks into the Home Assistant event loop."""
         self.hass.loop.call_soon_threadsafe(
             lambda: self.hass.async_create_task(self.async_handle_message(message))
+        )
+
+    def _handle_mq_diagnostic_threadsafe(self, diagnostic: dict[str, Any]) -> None:
+        """Bridge MQTT diagnostics into the Home Assistant event loop."""
+        self.hass.loop.call_soon_threadsafe(
+            lambda: self.hass.async_create_task(
+                self.async_handle_push_diagnostic(diagnostic)
+            )
         )
 
     async def _async_resolve_uid(self) -> str | None:
@@ -640,6 +814,8 @@ def _flatten_payloads(message: Any) -> list[dict[str, Any]]:
 
     if isinstance(message, dict):
         payloads = [message]
+    elif isinstance(message, list):
+        payloads = message
     else:
         payload = getattr(message, "payload", None) or getattr(message, "data", None)
         if isinstance(payload, str):
@@ -647,11 +823,16 @@ def _flatten_payloads(message: Any) -> list[dict[str, Any]]:
                 payload = json.loads(payload)
             except json.JSONDecodeError:
                 payload = None
-        payloads = [payload] if isinstance(payload, dict) else []
+        payloads = [payload] if isinstance(payload, (dict, list)) else []
 
     flattened: list[dict[str, Any]] = []
     for payload in payloads:
-        flattened.append(payload)
+        if isinstance(payload, dict):
+            flattened.append(payload)
+        elif isinstance(payload, list):
+            flattened.extend(_flatten_payloads(payload))
+        elif isinstance(payload, str):
+            flattened.extend(_flatten_payloads(payload))
 
     return flattened
 
@@ -672,9 +853,28 @@ def _event_value(payload: dict[str, Any]) -> Any:
 def _iter_topics(source_topic: Any) -> list[str]:
     """Return MQTT topics from common Tuya config shapes."""
     if isinstance(source_topic, dict):
-        return [topic for topic in source_topic.values() if isinstance(topic, str)]
+        topics: list[str] = []
+        for value in source_topic.values():
+            topics.extend(_iter_topics(value))
+        return topics
     if isinstance(source_topic, list):
-        return [topic for topic in source_topic if isinstance(topic, str)]
+        topics = []
+        for value in source_topic:
+            topics.extend(_iter_topics(value))
+        return topics
     if isinstance(source_topic, str):
         return [source_topic]
     return []
+
+
+def _safe_keys(value: Any) -> list[str] | None:
+    """Return sanitized payload keys for diagnostics."""
+    if isinstance(value, dict):
+        return sorted(str(key) for key in value.keys())
+    if isinstance(value, list):
+        keys: set[str] = set()
+        for item in value:
+            if isinstance(item, dict):
+                keys.update(str(key) for key in item.keys())
+        return sorted(keys) if keys else None
+    return None

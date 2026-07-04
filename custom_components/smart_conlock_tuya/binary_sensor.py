@@ -148,6 +148,39 @@ class TuyaSmartLockCallActiveSensor(TuyaSmartLockBinarySensor):
             "initiative_message_decoded": self._request_state.get(
                 "initiative_message_decoded"
             ),
+            "push_connect_result": self._request_state.get("push_connect_result"),
+            "push_topic_count": self._request_state.get("push_topic_count"),
+            "push_subscribed_topic_count": self._request_state.get(
+                "push_subscribed_topic_count"
+            ),
+            "push_last_subscribe_status": self._request_state.get(
+                "push_last_subscribe_status"
+            ),
+            "push_message_count": self._request_state.get("push_message_count"),
+            "push_last_message_time": self._request_state.get(
+                "push_last_message_time"
+            ),
+            "push_last_wrapper_keys": self._request_state.get(
+                "push_last_wrapper_keys"
+            ),
+            "push_last_decoded_payload_type": self._request_state.get(
+                "push_last_decoded_payload_type"
+            ),
+            "push_last_decoded_payload_keys": self._request_state.get(
+                "push_last_decoded_payload_keys"
+            ),
+            "push_last_decode_error": self._request_state.get(
+                "push_last_decode_error"
+            ),
+            "push_last_parsed_event_count": self._request_state.get(
+                "push_last_parsed_event_count"
+            ),
+            "push_last_event_codes": self._request_state.get(
+                "push_last_event_codes"
+            ),
+            "push_last_ignored_device_id": self._request_state.get(
+                "push_last_ignored_device_id"
+            ),
         }
 
     def _sync_from_runtime(self) -> None:
