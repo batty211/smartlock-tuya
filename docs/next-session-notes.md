@@ -66,6 +66,8 @@ Battery sensor:
 - Reads Tuya `battery_state`
 - Raw states: `high`, `medium`, `low`, `poweroff`
 - Attribute: `battery_percent_estimate`
+- Current behavior: no Home Assistant default polling.
+- Refreshes once when added, once per day, and when `Call Active` changes from off to on.
 
 `jtmspro` entities:
 
@@ -76,18 +78,10 @@ Battery sensor:
 Request detection now uses a shared runtime/coordinator:
 
 - Primary path: Tuya Device Status Notification MQTT messages.
-- Fallback/debug path: Tuya report logs every 60 seconds.
-- The 3-second entity-level REST polling path has been removed.
-
-Report-log fallback endpoint:
-
-- Endpoint: `GET /v2.1/cloud/thing/{device_id}/report-logs`
-- Codes checked:
-  - `doorbell`
-  - `initiative_message`
-  - `video_request_realtime`
-  - `photo_again`
-- Active window: 90 seconds
+- Current production path: push only. Do not poll report logs to detect active calls.
+- The old 3-second, 5-second, and 60-second REST polling paths have been removed from runtime.
+- Report-log helpers may still exist in `tuya_api.py` for investigation, but runtime must not schedule them automatically.
+- Active window: 60 seconds
 
 `initiative_message` is base64 decoded and treated as active when:
 
@@ -123,7 +117,7 @@ Implemented on 2026-07-04:
   - display name: `Call Active`
 - Do not use `smart_conlock_tuya_{device_id}_video_call_request`; that caused Home Assistant to show the old Call Active entity as no longer provided.
 - Runtime request events are filtered by configured `device_id`.
-- `doorbell` and `initiative_message` only open the 90-second unlock window when the event has a real timestamp.
+- `doorbell` and `initiative_message` only open the 60-second unlock window when the event has a real timestamp.
 - Untimed/latest status values such as stale `doorbell: true` or `video_request_realtime: AQABAQ==` do not open the unlock window.
 - `video_request_realtime` and `photo_again` are exposed as diagnostic attributes only.
 
@@ -190,10 +184,10 @@ Target architecture:
    - `initiative_message`
    - `video_request_realtime`
 3. When a request event arrives, set `Call Active` to on immediately.
-4. Open an unlock window for 90 seconds.
+4. Open an unlock window for 60 seconds.
 5. Make the lock entity available during that window if the device is online.
 6. After the window expires, turn request state off and make unlock unavailable again.
-7. Keep report logs only as fallback/debug, not the primary realtime path.
+7. Do not use report logs as an automatic fallback in production; the user explicitly rejected quota-heavy polling.
 
 ## Known Real Device Evidence
 
@@ -239,7 +233,7 @@ Device mapping from `Tuya/devices.json`:
    - If `diagnostic_status` is `push_unavailable`, inspect `last_error`.
 4. Press the lock doorbell and confirm:
    - `Call Active` turns on immediately or within the event path timing.
-   - The lock entity becomes available only while the device is online and the 90-second request window is active.
+   - The lock entity becomes available only while the device is online and the 60-second request window is active.
    - `video_request_realtime` remains diagnostic only.
 5. If MQTT does not connect, use the diagnostic attributes/logs to decide whether the access-config endpoint needs a different service permission, UID, region, or request body.
 
@@ -251,9 +245,9 @@ Device mapping from `Tuya/devices.json`:
 - Do not keep aggressive 3-second REST polling as production behavior.
 - Do not assume Tuya video services are required for the doorbell/request event. The event path should come from Device Status Notification.
 
-## 2026-07-04 Latest Runtime Findings
+## 2026-07-04 Historical Runtime Findings
 
-The `jtmspro` request-aware unlock flow now works through the report-log fallback.
+Historical note only: the `jtmspro` request-aware unlock flow was proven through the report-log fallback, but that fallback is no longer production behavior because it consumes too much Tuya API quota.
 
 Observed Home Assistant state after pressing the smart lock doorbell:
 
@@ -270,7 +264,7 @@ Observed Home Assistant state after pressing the smart lock doorbell:
   - `files`: includes `.jpg` and `.mjpeg` resource paths
 - `Call Active` turns on and the lock can be unlocked.
 
-Important timing note:
+Important historical timing note:
 
 - This is still slower than ideal because it is using the 60-second report-log fallback.
 - It may arrive close to the end of the real device's active unlock window.
@@ -299,7 +293,7 @@ Interpretation:
 - Made the MQTT event parser accept decoded payload roots that are lists.
 - Made report-log fallback handle timestamp fields beyond only `event_time`.
 - Made `initiative_message` fallback use decoded payload `time` when the report-log wrapper does not expose a usable timestamp.
-- Confirmed report-log fallback can activate the 90-second unlock window from `initiative_message`.
+- Confirmed report-log fallback can activate the 60-second unlock window from `initiative_message`.
 
 Latest validation passed:
 
@@ -455,27 +449,46 @@ Important behavior to preserve:
 - Do not call `TuyaCloudApi.async_lock()` for `jtmspro`.
 - Do not use `unlock_fingerprint`, `unlock_password`, `unlock_card`, `unlock_face`, `unlock_app`, or `unlock_hand` as proof of current physical lock status. They are event/counter style datapoints.
 
-## 2026-07-04 Latest Correction: Request-Only Fast Fallback
+## 2026-07-04 Historical Correction: Request-Only Fast Fallback
 
-Problem:
+Historical problem:
 
 - Tuya Device Status Notification can connect and subscribe, but real device events still have `push_message_count: 0`.
 - The image/media evidence can arrive in report logs before `Call Active` updates, so waiting for the 60-second full fallback is too slow.
 
-Implemented:
+Previously implemented, now removed:
 
-- Full fallback remains every 60 seconds for broader device/online/status diagnostics.
-- Added request-only fast fallback:
+- Full fallback every 60 seconds for broader device/online/status diagnostics.
+- Request-only fast fallback:
   - interval: 5 seconds;
   - refreshes only the request/call report-log state;
   - does not fetch full device status each time;
   - runs when push is unavailable, not ready, or connected/subscribed but silent;
   - stops automatically once push messages start arriving.
-- `binary_sensor.<lock_name>_call_active` now exposes:
+- `binary_sensor.<lock_name>_call_active` exposed:
   - `request_fast_fallback_active`
   - `request_fast_fallback_reason`
   - `request_fast_fallback_interval`
   - `request_last_refresh_time`
+
+Current correction:
+
+- Removed automatic report-log polling from `SmartConlockRuntime`.
+- Removed the 60-second full fallback timer.
+- Removed the 5-second request-only fast fallback timer.
+- Removed the 5-second fallback burst during an active request window.
+- `jtmspro` runtime now starts only the Tuya Device Status Notification listener and the MQTT access-config refresh timer.
+- If push does not deliver events, `Call Active` stays off instead of spending API quota polling report logs.
+- `lock.py` no longer fetches `auto_lock_time` or calls runtime fallback during setup/update for `jtmspro`.
+- Active call window is 60 seconds, matching the real device.
+- Battery refresh is reduced to startup, once per day, and active-call transition.
+
+Expected API usage after this correction:
+
+- Startup/config: token and setup calls, plus Open Hub access-config request.
+- Ongoing idle state: no active-call report-log polling and no 60-second device/status polling.
+- Periodic: Open Hub access-config refresh before expiry; battery once per day.
+- User action: unlock command still calls Tuya when the user presses Unlock during an active call.
 
 Latest validation passed:
 

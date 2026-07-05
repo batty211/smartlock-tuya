@@ -41,7 +41,7 @@ JTMSPRO_REQUEST_CODES = [
     "video_request_realtime",
     "photo_again",
 ]
-JTMSPRO_REQUEST_WINDOW = 90
+JTMSPRO_REQUEST_WINDOW = 60
 LOCK_MOTOR_STATE_CODE = "lock_motor_state"
 
 

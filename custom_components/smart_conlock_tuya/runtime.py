@@ -5,7 +5,6 @@ from __future__ import annotations
 import base64
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import timedelta
 import json
 import logging
 import time
@@ -14,16 +13,12 @@ from urllib.parse import urlsplit
 import uuid
 
 from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
-from homeassistant.helpers.event import async_call_later, async_track_time_interval
+from homeassistant.helpers.event import async_call_later
 
 from .tuya_api import JTMSPRO_REQUEST_WINDOW, TuyaCloudApi
 
 _LOGGER = logging.getLogger(__name__)
 
-FALLBACK_INTERVAL = timedelta(seconds=60)
-REQUEST_FAST_FALLBACK_INTERVAL = 5
-FALLBACK_BURST_INTERVAL = 5
-FALLBACK_BURST_MAX_REFRESHES = 18
 REQUEST_EVENT_CODES = {
     "doorbell",
     "initiative_message",
@@ -251,7 +246,7 @@ class SmartConlockRuntimeState:
     fallback_burst_remaining: int = 0
     request_fast_fallback_active: bool = False
     request_fast_fallback_reason: str | None = None
-    request_fast_fallback_interval: int = REQUEST_FAST_FALLBACK_INTERVAL
+    request_fast_fallback_interval: int | None = None
     request_last_refresh_time: int | None = None
     request_window_seconds: int = JTMSPRO_REQUEST_WINDOW
     source: str | None = None
@@ -347,7 +342,7 @@ class SmartConlockRuntimeState:
 
 
 class SmartConlockRuntime:
-    """Coordinate push and fallback state for a configured jtmspro lock."""
+    """Coordinate push state for a configured jtmspro lock."""
 
     def __init__(
         self,
@@ -362,41 +357,22 @@ class SmartConlockRuntime:
         self.device_id = device_id
         self.state = SmartConlockRuntimeState()
         self._listeners: list[Callable[[], None]] = []
-        self._unsub_fallback: CALLBACK_TYPE | None = None
         self._unsub_expiry: CALLBACK_TYPE | None = None
         self._unsub_mq_refresh: CALLBACK_TYPE | None = None
-        self._unsub_fallback_burst: CALLBACK_TYPE | None = None
-        self._unsub_request_fast_fallback: CALLBACK_TYPE | None = None
         self._mq: DeviceStatusNotificationClient | None = None
 
     async def async_start(self) -> None:
         """Start runtime services."""
-        await self.async_refresh_fallback()
         await self._async_start_mq()
-        self._unsub_fallback = async_track_time_interval(
-            self.hass,
-            self._async_refresh_fallback_callback,
-            FALLBACK_INTERVAL,
-        )
-        self._schedule_request_fast_fallback()
 
     async def async_stop(self) -> None:
         """Stop runtime services."""
-        if self._unsub_fallback:
-            self._unsub_fallback()
-            self._unsub_fallback = None
         if self._unsub_expiry:
             self._unsub_expiry()
             self._unsub_expiry = None
         if self._unsub_mq_refresh:
             self._unsub_mq_refresh()
             self._unsub_mq_refresh = None
-        if self._unsub_fallback_burst:
-            self._unsub_fallback_burst()
-            self._unsub_fallback_burst = None
-        if self._unsub_request_fast_fallback:
-            self._unsub_request_fast_fallback()
-            self._unsub_request_fast_fallback = None
         await self._async_stop_mq()
         self._listeners.clear()
 
@@ -417,124 +393,6 @@ class SmartConlockRuntime:
         """Notify entities that runtime state changed."""
         for listener in list(self._listeners):
             listener()
-
-    async def async_refresh_fallback(self, _now: Any = None) -> None:
-        """Refresh slow fallback state from REST APIs."""
-        changed = False
-        refresh_time = int(time.time() * 1000)
-        if self.state.fallback_last_refresh_time != refresh_time:
-            self.state.fallback_last_refresh_time = refresh_time
-            changed = True
-        try:
-            online = await self.api.async_get_device_online(self.device_id)
-            if online != self.state.online:
-                self.state.online = online
-                changed = True
-        except Exception as err:  # noqa: BLE001
-            self.state.last_error = f"online_refresh_failed: {err}"
-            self.state.diagnostic_status = "fallback_error"
-            changed = True
-
-        try:
-            request_state = await self.api.async_get_jtmspro_request_state(
-                self.device_id
-            )
-            changed = self._merge_fallback_request_state(request_state) or changed
-        except Exception as err:  # noqa: BLE001
-            self.state.last_error = f"report_log_refresh_failed: {err}"
-            self.state.diagnostic_status = "fallback_error"
-            changed = True
-
-        try:
-            lock_state = await self.api.async_get_lock_activity_state(self.device_id)
-            changed = self._merge_fallback_lock_state(lock_state) or changed
-        except Exception as err:  # noqa: BLE001
-            self.state.last_error = f"lock_state_refresh_failed: {err}"
-            changed = True
-
-        if changed:
-            self.async_notify_listeners()
-
-    async def _async_refresh_fallback_callback(self, now: Any) -> None:
-        await self.async_refresh_fallback(now)
-
-    async def async_refresh_request_fallback(self) -> None:
-        """Refresh only request/call state from report logs."""
-        changed = False
-        refresh_time = int(time.time() * 1000)
-        if self.state.request_last_refresh_time != refresh_time:
-            self.state.request_last_refresh_time = refresh_time
-            changed = True
-
-        try:
-            request_state = await self.api.async_get_jtmspro_request_state(
-                self.device_id
-            )
-            changed = self._merge_fallback_request_state(request_state) or changed
-        except Exception as err:  # noqa: BLE001
-            self.state.last_error = f"request_fast_refresh_failed: {err}"
-            self.state.diagnostic_status = "request_fast_fallback_error"
-            changed = True
-
-        if changed:
-            self.async_notify_listeners()
-
-    def _merge_fallback_request_state(self, request_state: dict[str, Any]) -> bool:
-        """Merge slow report-log fallback state into runtime state."""
-        before = self.state.request_state()
-
-        self.state.report_log_error = request_state.get("report_log_error")
-        self.state.report_log_count = request_state.get("report_log_count")
-        self.state.request_window_seconds = request_state.get(
-            "request_window_seconds", JTMSPRO_REQUEST_WINDOW
-        )
-
-        if request_state.get("doorbell") is not None:
-            self.state.doorbell = request_state.get("doorbell")
-        if request_state.get("video_request_realtime") is not None:
-            self.state.video_request_realtime = request_state.get(
-                "video_request_realtime"
-            )
-        if request_state.get("photo_again") is not None:
-            self.state.photo_again = request_state.get("photo_again")
-        if request_state.get("initiative_message_decoded") is not None:
-            self.state.initiative_message_decoded = request_state.get(
-                "initiative_message_decoded"
-            )
-
-        event_time = request_state.get("last_event_time")
-        if request_state.get("active") is True and event_time:
-            self._activate_request(
-                source=request_state.get("source") or "report_logs",
-                value=None,
-                event_time=event_time,
-                diagnostic_status="fallback_recent_request_detected",
-                notify=False,
-            )
-        elif not self.state.request_active:
-            self.state.diagnostic_status = request_state.get(
-                "diagnostic_status", "fallback_no_recent_request"
-            )
-
-        return before != self.state.request_state()
-
-    def _merge_fallback_lock_state(self, lock_state: dict[str, Any]) -> bool:
-        """Merge slow status/report-log lock state into runtime state."""
-        before = self.state.lock_state()
-
-        if lock_state.get("locked") is not None:
-            self.state.locked = lock_state.get("locked")
-            self.state.state_source = lock_state.get("state_source")
-            self.state.state_confidence = lock_state.get(
-                "state_confidence", "physical_dp"
-            )
-        self.state.lock_motor_state = lock_state.get("lock_motor_state")
-        self.state.lock_report_log_error = lock_state.get("lock_report_log_error")
-        self.state.lock_report_log_count = lock_state.get("lock_report_log_count")
-        if lock_state.get("last_lock_operation") is not None:
-            self.state.last_lock_operation = lock_state.get("last_lock_operation")
-
-        return before != self.state.lock_state()
 
     async def async_handle_message(self, message: Any) -> None:
         """Handle a Tuya Device Status Notification message."""
@@ -571,6 +429,10 @@ class SmartConlockRuntime:
                     self.state.online = online
                     changed = True
                 continue
+
+            if self.state.online is not True:
+                self.state.online = True
+                changed = True
 
             if code in LOCK_STATE_CODES:
                 locked = self.api.interpret_lock_motor_state(value)
@@ -663,7 +525,6 @@ class SmartConlockRuntime:
             self.state.push_message_count += 1
             self.state.push_last_message_time = int(time.time() * 1000)
             self.state.push_last_wrapper_keys = diagnostic.get("wrapper_keys")
-            self._stop_request_fast_fallback()
         elif event == "decoded":
             self.state.push_last_decoded_payload_type = diagnostic.get(
                 "decoded_payload_type"
@@ -676,64 +537,6 @@ class SmartConlockRuntime:
             self.state.push_last_decode_error = diagnostic.get("decode_error")
 
         self.async_notify_listeners()
-
-    @callback
-    def _schedule_request_fast_fallback(self) -> None:
-        """Schedule a fast request-only fallback when push is not delivering."""
-        if self._unsub_request_fast_fallback:
-            return
-        self._unsub_request_fast_fallback = async_call_later(
-            self.hass,
-            REQUEST_FAST_FALLBACK_INTERVAL,
-            self._run_request_fast_fallback,
-        )
-
-    @callback
-    def _run_request_fast_fallback(self, _now: Any = None) -> None:
-        """Run request-only fallback while Tuya push is silent."""
-        self._unsub_request_fast_fallback = None
-        reason = self._request_fast_fallback_reason()
-        if reason is None:
-            self._stop_request_fast_fallback()
-            return
-
-        self.state.request_fast_fallback_active = True
-        self.state.request_fast_fallback_reason = reason
-        self.state.request_fast_fallback_interval = REQUEST_FAST_FALLBACK_INTERVAL
-        self.hass.async_create_task(self.async_refresh_request_fallback())
-        self._unsub_request_fast_fallback = async_call_later(
-            self.hass,
-            REQUEST_FAST_FALLBACK_INTERVAL,
-            self._run_request_fast_fallback,
-        )
-        self.async_notify_listeners()
-
-    @callback
-    def _stop_request_fast_fallback(self) -> None:
-        """Stop request-only fallback diagnostics and timer."""
-        if self._unsub_request_fast_fallback:
-            self._unsub_request_fast_fallback()
-            self._unsub_request_fast_fallback = None
-        if self.state.request_fast_fallback_active:
-            self.state.request_fast_fallback_active = False
-            self.state.request_fast_fallback_reason = None
-            self.async_notify_listeners()
-
-    def _request_fast_fallback_reason(self) -> str | None:
-        """Return why request-only fallback should run, if needed."""
-        if self.state.push_message_count > 0:
-            return None
-        if self.state.online is False:
-            return None
-        if self.state.push_connect_result == 0 and (
-            self.state.push_subscribed_topic_count or 0
-        ) > 0:
-            return "push_silent"
-        if self.state.diagnostic_status == "push_unavailable":
-            return "push_unavailable"
-        if self.state.push_connect_result is None:
-            return "push_not_ready"
-        return None
 
     @callback
     def _activate_request(
@@ -754,12 +557,6 @@ class SmartConlockRuntime:
         if expires_at <= time.time():
             return
 
-        same_active_event = (
-            self.state.request_active
-            and self.state.last_event_time == event_time_ms
-            and self.state.source == source
-        )
-
         if self._unsub_expiry:
             self._unsub_expiry()
             self._unsub_expiry = None
@@ -777,8 +574,6 @@ class SmartConlockRuntime:
             max(0, expires_at - time.time()),
             self._expire_request,
         )
-        if not same_active_event:
-            self._schedule_fallback_burst()
         if notify:
             self.async_notify_listeners()
 
@@ -805,46 +600,12 @@ class SmartConlockRuntime:
     def _expire_request(self, _now: Any = None) -> None:
         """Close an active unlock request window."""
         self._unsub_expiry = None
-        if self._unsub_fallback_burst:
-            self._unsub_fallback_burst()
-            self._unsub_fallback_burst = None
         self.state.request_active = False
         self.state.request_expires_at = None
         self.state.fallback_burst_active = False
         self.state.fallback_burst_remaining = 0
         self.state.diagnostic_status = "request_window_expired"
         self.async_notify_listeners()
-
-    @callback
-    def _schedule_fallback_burst(self) -> None:
-        """Temporarily refresh fallback faster during an active request window."""
-        self.state.fallback_burst_active = True
-        self.state.fallback_burst_remaining = FALLBACK_BURST_MAX_REFRESHES
-        if self._unsub_fallback_burst:
-            self._unsub_fallback_burst()
-        self._unsub_fallback_burst = async_call_later(
-            self.hass,
-            FALLBACK_BURST_INTERVAL,
-            self._run_fallback_burst,
-        )
-
-    @callback
-    def _run_fallback_burst(self, _now: Any = None) -> None:
-        """Run one fast fallback refresh and schedule the next while useful."""
-        self._unsub_fallback_burst = None
-        if not self.state.request_active or self.state.fallback_burst_remaining <= 0:
-            self.state.fallback_burst_active = False
-            self.state.fallback_burst_remaining = 0
-            self.async_notify_listeners()
-            return
-
-        self.state.fallback_burst_remaining -= 1
-        self.hass.async_create_task(self.async_refresh_fallback())
-        self._unsub_fallback_burst = async_call_later(
-            self.hass,
-            FALLBACK_BURST_INTERVAL,
-            self._run_fallback_burst,
-        )
 
     async def _async_start_mq(self) -> None:
         """Start Tuya Device Status Notification MQTT client."""

@@ -42,7 +42,9 @@ async def async_setup_entry(
     device_name = entry_data[CONF_DEVICE_NAME]
     device_category = entry_data.get(CONF_DEVICE_CATEGORY)
 
-    device_auto_lock_time = await api.async_get_auto_lock_time(device_id)
+    device_auto_lock_time = None
+    if device_category != "jtmspro":
+        device_auto_lock_time = await api.async_get_auto_lock_time(device_id)
     configured_relock_delay = _configured_relock_delay(entry)
     relock_delay = device_auto_lock_time or configured_relock_delay
     relock_delay_source = (
@@ -164,8 +166,6 @@ class TuyaSmartLock(LockEntity):
                 self._attr_is_locked = locked
             return
 
-        if self._runtime is not None:
-            await self._runtime.async_refresh_fallback()
         self._sync_from_runtime()
 
     async def async_added_to_hass(self) -> None:
